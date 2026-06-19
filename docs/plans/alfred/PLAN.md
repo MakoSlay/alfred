@@ -61,7 +61,7 @@ If the new project initially lacks one of those scripts, add the missing script 
 
 | Order | Task | File | Status | Depends On |
 |---:|---|---|---|---|
-| 000 | Orientation and boundary map | [000-orientation.md](000-orientation.md) | Not Started | None |
+| 000 | Orientation and boundary map | [000-orientation.md](000-orientation.md) | Complete | None |
 | 001 | Runtime contracts and event model | [001-runtime-contracts.md](001-runtime-contracts.md) | Not Started | 000 |
 | 002 | Standalone project skeleton | [002-standalone-project-skeleton.md](002-standalone-project-skeleton.md) | In Progress | 001 |
 | 003 | cmux world model adapter | [003-cmux-world-model-adapter.md](003-cmux-world-model-adapter.md) | Not Started | 002 |
