@@ -15,3 +15,26 @@ docs/plans/alfred/PLAN.md
 ## Initial Goal
 
 Build a local runtime/daemon that uses cmux as the workspace/surface substrate, then expose it through `/alfred` in Pi, CLI, web UI, and eventually non-Pi voice/input surfaces.
+
+## Development
+
+The current Pi extension remains the live/default `/alfred` path while this repo is built in parallel.
+
+```bash
+npm install
+npm run check
+npm run typecheck
+npm test
+```
+
+Initial source layout:
+
+```text
+src/contracts/   Shared request/response/action/event contracts
+src/core/        Alfred core runtime placeholder
+src/cmux/        cmux world-model adapter placeholder
+src/daemon/      daemon/server placeholder
+src/cli/         CLI source placeholder
+src/web/         web/dashboard source placeholder
+src/testing/     contract fixtures and test helpers
+```

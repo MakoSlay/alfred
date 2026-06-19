@@ -63,7 +63,7 @@ If the new project initially lacks one of those scripts, add the missing script 
 |---:|---|---|---|---|
 | 000 | Orientation and boundary map | [000-orientation.md](000-orientation.md) | Complete | None |
 | 001 | Runtime contracts and event model | [001-runtime-contracts.md](001-runtime-contracts.md) | Complete | 000 |
-| 002 | Standalone project skeleton | [002-standalone-project-skeleton.md](002-standalone-project-skeleton.md) | In Progress | 001 |
+| 002 | Standalone project skeleton | [002-standalone-project-skeleton.md](002-standalone-project-skeleton.md) | Complete | 001 |
 | 003 | cmux world model adapter | [003-cmux-world-model-adapter.md](003-cmux-world-model-adapter.md) | Not Started | 002 |
 | 004 | Alfred daemon API | [004-alfred-daemon-api.md](004-alfred-daemon-api.md) | Not Started | 001, 002, 003 |
 | 005 | Draft-confirm and action execution | [005-draft-confirm-action-execution.md](005-draft-confirm-action-execution.md) | Not Started | 004 |
