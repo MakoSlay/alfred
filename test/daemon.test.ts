@@ -271,6 +271,26 @@ test("failed sends do not claim success", async () => {
 	}
 });
 
+test("dashboard route renders local UI without exposing daemon state", async () => {
+	await withDaemon(async (baseUrl, token) => {
+		const dashboard = await fetch(`${baseUrl}/dashboard`);
+		assert.equal(dashboard.status, 200);
+		assert.equal(dashboard.headers.get("content-type")?.includes("text/html"), true);
+		assert.equal(dashboard.headers.has("access-control-allow-origin"), false);
+		const html = await dashboard.text();
+		assert.match(html, /Alfred Local Dashboard/);
+		assert.match(html, /GET \/surfaces|\/surfaces/);
+		assert.match(html, /pending drafts/i);
+		assert.match(html, /confirm/i);
+		assert.match(html, /cancel/i);
+		assert.match(html, /x-alfred-auth/);
+		assert.equal(html.includes(token), false);
+
+		const badOrigin = await fetch(`${baseUrl}/dashboard`, { headers: { origin: "https://evil.test" } });
+		assert.equal(badOrigin.status, 403);
+	});
+});
+
 test("daemon rejects DNS rebinding and cross-origin browser-style requests", async () => {
 	await withDaemon(async (baseUrl, token) => {
 		const badHost = await rawGetWithHost(baseUrl, "/state", "evil.test", token);

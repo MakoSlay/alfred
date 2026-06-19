@@ -129,15 +129,21 @@ async function handleDaemonRequest(
 	cmux: AlfredDaemonCmux,
 	now: () => Date,
 ): Promise<void> {
-	const guard = guardRequest(request, config);
+	const url = new URL(request.url ?? "/", `http://${request.headers.host ?? config.host}`);
+	const authOptionalRoute = request.method === "GET" && (url.pathname === "/health" || url.pathname === "/" || url.pathname === "/dashboard");
+	const guard = guardRequest(request, config, { requireAuth: !authOptionalRoute });
 	if (!guard.ok) {
 		writeJson(response, guard.status, { ok: false, error: guard.error });
 		return;
 	}
 
-	const url = new URL(request.url ?? "/", `http://${request.headers.host ?? config.host}`);
 	if (request.method === "GET" && url.pathname === "/health") {
 		writeJson(response, 200, { ok: true, health: "ok" });
+		return;
+	}
+
+	if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/dashboard")) {
+		writeHtml(response, renderDashboardHtml());
 		return;
 	}
 
@@ -714,7 +720,11 @@ function cmuxUnavailableResponse(requestId: string, createdAt: IsoTimestamp, mes
 	};
 }
 
-function guardRequest(request: IncomingMessage, config: AlfredDaemonConfig): { ok: true } | { ok: false; status: number; error: { code: string; message: string; retryable: boolean } } {
+function guardRequest(
+	request: IncomingMessage,
+	config: AlfredDaemonConfig,
+	options: { requireAuth: boolean } = { requireAuth: true },
+): { ok: true } | { ok: false; status: number; error: { code: string; message: string; retryable: boolean } } {
 	if (request.method === "OPTIONS") {
 		return { ok: false, status: 403, error: { code: "cors_forbidden", message: "CORS preflight is not allowed for Alfred local control APIs.", retryable: false } };
 	}
@@ -726,7 +736,7 @@ function guardRequest(request: IncomingMessage, config: AlfredDaemonConfig): { o
 	if (origin && !originAllowed(origin, config.allowedOrigins, config.allowedHosts)) {
 		return { ok: false, status: 403, error: { code: "origin_forbidden", message: "Origin is not allowed.", retryable: false } };
 	}
-	if (request.url !== "/health" && !authAllowed(request, config.authToken)) {
+	if (options.requireAuth && !authAllowed(request, config.authToken)) {
 		return { ok: false, status: 401, error: { code: "auth_required", message: "Missing or invalid Alfred local auth token.", retryable: false } };
 	}
 	return { ok: true };
@@ -780,6 +790,204 @@ function writeJson(response: ServerResponse, status: number, value: unknown): vo
 		"X-Content-Type-Options": "nosniff",
 	});
 	response.end(JSON.stringify(value));
+}
+
+function writeHtml(response: ServerResponse, html: string): void {
+	response.writeHead(200, {
+		"Content-Type": "text/html; charset=utf-8",
+		"Cache-Control": "no-store",
+		"X-Content-Type-Options": "nosniff",
+		"Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+	});
+	response.end(html);
+}
+
+function renderDashboardHtml(): string {
+	return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alfred Local Dashboard</title>
+<style>
+:root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+body { margin: 0; padding: 24px; background: Canvas; color: CanvasText; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 20px; }
+h1 { margin: 0; font-size: 1.6rem; }
+button, input { font: inherit; }
+input { min-width: 22rem; padding: 6px 8px; }
+button { padding: 6px 10px; cursor: pointer; }
+.status { font-size: 0.92rem; opacity: 0.8; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+section { border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 12px; padding: 14px; background: color-mix(in srgb, CanvasText 4%, transparent); }
+h2 { margin: 0 0 10px; font-size: 1rem; }
+ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+li { border: 1px solid color-mix(in srgb, CanvasText 12%, transparent); border-radius: 8px; padding: 8px; }
+.meta { display: block; margin-top: 4px; font-size: 0.82rem; opacity: 0.72; }
+.actions { display: flex; gap: 8px; margin-top: 8px; }
+.warning { color: #b45309; }
+.error { color: #dc2626; }
+.empty { opacity: 0.7; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Alfred Local Dashboard</h1>
+  <label>Local token <input id="token" type="password" autocomplete="off" placeholder="Paste ALFRED_LOCAL_TOKEN"></label>
+  <button id="save-token" type="button">Save</button>
+  <button id="refresh" type="button">Refresh</button>
+  <span id="status" class="status">Idle</span>
+</header>
+<main class="grid">
+  <section>
+    <h2>Visible surfaces and workspaces</h2>
+    <ul id="surfaces"><li class="empty">Not loaded.</li></ul>
+  </section>
+  <section>
+    <h2>Pending drafts</h2>
+    <ul id="drafts"><li class="empty">Not loaded.</li></ul>
+  </section>
+  <section>
+    <h2>Recent activity</h2>
+    <ul id="events"><li class="empty">Not loaded.</li></ul>
+  </section>
+</main>
+<script>
+(() => {
+  const tokenInput = document.getElementById('token');
+  const status = document.getElementById('status');
+  const surfaces = document.getElementById('surfaces');
+  const drafts = document.getElementById('drafts');
+  const events = document.getElementById('events');
+  const queryToken = new URLSearchParams(location.search).get('token') || '';
+  tokenInput.value = queryToken || localStorage.getItem('alfred.localToken') || '';
+
+  function setStatus(message, isError = false) {
+    status.textContent = message;
+    status.className = isError ? 'status error' : 'status';
+  }
+
+  function authHeaders(json = false) {
+    const headers = { 'x-alfred-auth': tokenInput.value.trim() };
+    if (json) headers['content-type'] = 'application/json';
+    return headers;
+  }
+
+  async function api(path, options = {}) {
+    const response = await fetch(path, { ...options, headers: { ...authHeaders(Boolean(options.body)), ...(options.headers || {}) } });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body?.error?.message || body?.errors?.[0]?.message || response.statusText);
+    return body;
+  }
+
+  function clearList(node, emptyText) {
+    node.replaceChildren();
+    const item = document.createElement('li');
+    item.className = 'empty';
+    item.textContent = emptyText;
+    node.append(item);
+  }
+
+  function safeRedactedText(text) {
+    if (!text) return '';
+    if (text.redaction?.status === 'contains_sensitive' || text.redaction?.status === 'redacted') return '[redacted]';
+    return text.value || '';
+  }
+
+  function renderSurfaces(targets) {
+    surfaces.replaceChildren();
+    if (!targets?.length) return clearList(surfaces, 'No cmux targets visible.');
+    for (const target of targets.slice(0, 80)) {
+      const item = document.createElement('li');
+      const title = document.createElement('strong');
+      title.textContent = target.label || target.ref;
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = target.kind + ' · ' + target.ref + (target.workspaceLabel ? ' · ' + target.workspaceLabel : '') + (target.current ? ' · current' : '');
+      item.append(title, meta);
+      surfaces.append(item);
+    }
+  }
+
+  function renderDrafts(items) {
+    drafts.replaceChildren();
+    if (!items?.length) return clearList(drafts, 'No pending drafts.');
+    for (const draft of items) {
+      const item = document.createElement('li');
+      const title = document.createElement('strong');
+      title.textContent = draft.target?.label || draft.target?.ref || draft.id;
+      const text = document.createElement('span');
+      text.className = 'meta';
+      text.textContent = safeRedactedText(draft.text);
+      const expires = document.createElement('span');
+      expires.className = 'meta warning';
+      expires.textContent = 'Expires ' + draft.expiresAt;
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const confirm = document.createElement('button');
+      confirm.type = 'button';
+      confirm.textContent = 'Confirm send';
+      confirm.addEventListener('click', () => confirmDraft(draft.id));
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = 'Cancel';
+      cancel.addEventListener('click', () => cancelDraft(draft.id));
+      actions.append(confirm, cancel);
+      item.append(title, text, expires, actions);
+      drafts.append(item);
+    }
+  }
+
+  function renderEvents(items) {
+    events.replaceChildren();
+    if (!items?.length) return clearList(events, 'No recent activity.');
+    for (const event of items.slice(0, 80)) {
+      const item = document.createElement('li');
+      const title = document.createElement('strong');
+      title.textContent = event.summary || event.kind;
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = event.kind + ' · ' + event.createdAt + ' · retention ' + (event.retention?.policy || 'unknown') + ' · redaction ' + (event.redaction?.status || 'unknown');
+      item.append(title, meta);
+      events.append(item);
+    }
+  }
+
+  async function refresh() {
+    if (!tokenInput.value.trim()) {
+      setStatus('Enter the local token before loading daemon state.', true);
+      return;
+    }
+    setStatus('Refreshing...');
+    const [state, surfaceData] = await Promise.all([api('/state'), api('/surfaces')]);
+    renderSurfaces(surfaceData.targets || []);
+    renderDrafts(state.pendingDrafts || []);
+    renderEvents(state.events || []);
+    setStatus('Updated ' + new Date().toLocaleTimeString());
+  }
+
+  async function confirmDraft(draftId) {
+    setStatus('Confirming draft...');
+    await api('/confirm', { method: 'POST', body: JSON.stringify({ draftId }) });
+    await refresh();
+  }
+
+  async function cancelDraft(draftId) {
+    setStatus('Cancelling draft...');
+    await api('/cancel', { method: 'POST', body: JSON.stringify({ draftId, reason: 'dashboard cancel' }) });
+    await refresh();
+  }
+
+  document.getElementById('save-token').addEventListener('click', () => {
+    localStorage.setItem('alfred.localToken', tokenInput.value.trim());
+    setStatus('Token saved locally in this browser.');
+  });
+  document.getElementById('refresh').addEventListener('click', () => refresh().catch((error) => setStatus(error.message, true)));
+  if (tokenInput.value.trim()) refresh().catch((error) => setStatus(error.message, true));
+})();
+</script>
+</body>
+</html>`;
 }
 
 function snapshotState(state: DaemonState): AlfredDaemonStateSnapshot {
