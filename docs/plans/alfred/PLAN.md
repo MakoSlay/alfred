@@ -64,7 +64,7 @@ If the new project initially lacks one of those scripts, add the missing script 
 | 000 | Orientation and boundary map | [000-orientation.md](000-orientation.md) | Complete | None |
 | 001 | Runtime contracts and event model | [001-runtime-contracts.md](001-runtime-contracts.md) | Complete | 000 |
 | 002 | Standalone project skeleton | [002-standalone-project-skeleton.md](002-standalone-project-skeleton.md) | Complete | 001 |
-| 003 | cmux world model adapter | [003-cmux-world-model-adapter.md](003-cmux-world-model-adapter.md) | Not Started | 002 |
+| 003 | cmux world model adapter | [003-cmux-world-model-adapter.md](003-cmux-world-model-adapter.md) | Complete | 002 |
 | 004 | Alfred daemon API | [004-alfred-daemon-api.md](004-alfred-daemon-api.md) | Not Started | 001, 002, 003 |
 | 005 | Draft-confirm and action execution | [005-draft-confirm-action-execution.md](005-draft-confirm-action-execution.md) | Not Started | 004 |
 | 006 | Web dashboard foundation | [006-web-dashboard-foundation.md](006-web-dashboard-foundation.md) | Not Started | 004, 005 |
@@ -96,7 +96,7 @@ Do not expand scope just because these projects have broader features. Use them 
 |---|---|---|
 | Existing Pi extension still works | Not Verified | Run existing gates after any source changes. |
 | New standalone repo created outside monolith | Complete | Created at `/Users/muhammadabdul/work/alfred` and pushed to private GitHub repo `MakoSlay/alfred`. |
-| cmux adapter can list current workspaces/surfaces | Not Started | Requires Task 003. |
+| cmux adapter can list current workspaces/surfaces | Complete | `src/cmux/index.ts` implements workspace/surface listing and fixture-backed target resolution. |
 | daemon can handle and confirm drafts | Not Started | Requires Tasks 004-005. |
 | web dashboard shows recent activity | Not Started | Requires Task 006. |
 | Pi bridge is feature-flagged | Not Started | Requires Task 007. |
