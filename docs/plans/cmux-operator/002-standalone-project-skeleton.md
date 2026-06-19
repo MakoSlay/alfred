@@ -10,7 +10,7 @@ Initialize `/Users/muhammadabdul/work/cmux-operator` with TypeScript tooling, pa
 
 ## Checklist
 
-- [ ] Create `/Users/muhammadabdul/work/cmux-operator` as a separate git repository or worktree-owned project outside monolith.
+- [x] Create `/Users/muhammadabdul/work/cmux-operator` as a separate git repository outside monolith.
 - [ ] Add package metadata and TypeScript configuration.
 - [ ] Add `npm run check`, `npm run typecheck`, and `npm test` scripts.
 - [ ] Add initial package/source layout for core, cmux adapter, daemon, CLI, and web/dashboard placeholders.
@@ -37,14 +37,16 @@ npm test
 
 ## Completion Criteria
 
-- [ ] New standalone project exists outside monolith.
+- [x] New standalone project exists outside monolith.
 - [ ] All baseline scripts pass.
 - [ ] No Pi behavior changed.
 - [ ] Validation results are recorded below.
 
 ## Notes
 
-_To be filled during implementation._
+- Local repository exists at `/Users/muhammadabdul/work/cmux-operator`.
+- Private GitHub remote exists at `MakoSlay/cmux-operator`.
+- Package/tooling skeleton still needs to be implemented before this task is complete.
 
 ## Validation
 

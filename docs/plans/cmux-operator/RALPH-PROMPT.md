@@ -5,7 +5,7 @@ You are implementing the CMUX Operator plan.
 The plan lives at:
 
 ```text
-/Users/muhammadabdul/work/pi-smart-voice-notify/docs/plans/cmux-operator
+/Users/muhammadabdul/work/cmux-operator/docs/plans/cmux-operator
 ```
 
 The current live Alfred/Pi extension source repo is:

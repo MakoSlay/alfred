@@ -14,7 +14,9 @@ Create contract definitions and examples for requests, responses, actions, targe
 - [ ] Define target contracts for cmux workspaces, surfaces, Pi chats, Codex sessions, and unknown terminals.
 - [ ] Define action contracts for draft, confirm, cancel, send, loop start, loop stop, and status.
 - [ ] Define event/history contracts for dashboard rendering and debugging.
+- [ ] Define redaction and retention fields for transcript snippets, prompt text, and action history.
 - [ ] Define daemon error shapes and fallback semantics.
+- [ ] Define a capability/permission model for read-only, draft-only, confirmed-send, and autonomous-loop actions.
 - [ ] Add contract examples for the Powerco/Power Code draft-confirm flow.
 
 ## Tests
@@ -35,6 +37,8 @@ If the task only creates documentation before the project exists, record that an
 - [ ] Contracts are documented or implemented in the standalone project.
 - [ ] Examples show Pi and non-Pi surfaces.
 - [ ] Error/fallback behavior is explicit.
+- [ ] Sensitive data retention and redaction behavior is explicit.
+- [ ] Action capability boundaries are explicit.
 - [ ] Validation results are recorded below.
 
 ## Notes

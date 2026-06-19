@@ -50,6 +50,8 @@ If the new project initially lacks one of those scripts, add the missing script 
 
 - Do not break the current `/alfred` Pi flow.
 - Do not move secrets from the live Pi extension into the new repo.
+- Treat transcript/history data as sensitive local data: redact secrets where possible, define retention, and avoid committing captured transcripts.
+- Do not expose action APIs beyond localhost/Unix socket without an explicit auth model.
 - Do not make the Pi extension depend on the new daemon by default.
 - Any new bridge from Pi to the daemon must be feature-flagged and fail closed back to the existing Pi-local behavior.
 - cmux should be treated as the substrate/control plane, not as the owner of Alfred product policy.
@@ -60,7 +62,7 @@ If the new project initially lacks one of those scripts, add the missing script 
 |---:|---|---|---|---|
 | 000 | Orientation and boundary map | [000-orientation.md](000-orientation.md) | Not Started | None |
 | 001 | Runtime contracts and event model | [001-runtime-contracts.md](001-runtime-contracts.md) | Not Started | 000 |
-| 002 | Standalone project skeleton | [002-standalone-project-skeleton.md](002-standalone-project-skeleton.md) | Not Started | 001 |
+| 002 | Standalone project skeleton | [002-standalone-project-skeleton.md](002-standalone-project-skeleton.md) | In Progress | 001 |
 | 003 | cmux world model adapter | [003-cmux-world-model-adapter.md](003-cmux-world-model-adapter.md) | Not Started | 002 |
 | 004 | Alfred daemon API | [004-alfred-daemon-api.md](004-alfred-daemon-api.md) | Not Started | 001, 002, 003 |
 | 005 | Draft-confirm and action execution | [005-draft-confirm-action-execution.md](005-draft-confirm-action-execution.md) | Not Started | 004 |
@@ -81,7 +83,7 @@ If the new project initially lacks one of those scripts, add the missing script 
 | Gate | Status | Notes |
 |---|---|---|
 | Existing Pi extension still works | Not Verified | Run existing gates after any source changes. |
-| New standalone repo created outside monolith | Not Started | Target path: `/Users/muhammadabdul/work/cmux-operator`. |
+| New standalone repo created outside monolith | Complete | Created at `/Users/muhammadabdul/work/cmux-operator` and pushed to private GitHub repo `MakoSlay/cmux-operator`. |
 | cmux adapter can list current workspaces/surfaces | Not Started | Requires Task 003. |
 | daemon can handle and confirm drafts | Not Started | Requires Tasks 004-005. |
 | web dashboard shows recent activity | Not Started | Requires Task 006. |
