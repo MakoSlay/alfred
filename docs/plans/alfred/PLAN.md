@@ -68,7 +68,7 @@ If the new project initially lacks one of those scripts, add the missing script 
 | 004 | Alfred daemon API | [004-alfred-daemon-api.md](004-alfred-daemon-api.md) | Complete | 001, 002, 003 |
 | 005 | Draft-confirm and action execution | [005-draft-confirm-action-execution.md](005-draft-confirm-action-execution.md) | Complete | 004 |
 | 006 | Web dashboard foundation | [006-web-dashboard-foundation.md](006-web-dashboard-foundation.md) | Complete | 004, 005 |
-| 007 | Pi bridge and extraction path | [007-pi-bridge-extraction-path.md](007-pi-bridge-extraction-path.md) | Not Started | 004, 005 |
+| 007 | Pi bridge and extraction path | [007-pi-bridge-extraction-path.md](007-pi-bridge-extraction-path.md) | Complete | 004, 005 |
 
 ## External Reference Notes
 
@@ -94,22 +94,22 @@ Do not expand scope just because these projects have broader features. Use them 
 
 | Gate | Status | Notes |
 |---|---|---|
-| Existing Pi extension still works | Not Verified | Run existing gates after any source changes. |
+| Existing Pi extension still works | Complete | Pi extension gates passed after the optional daemon bridge change. |
 | New standalone repo created outside monolith | Complete | Created at `/Users/muhammadabdul/work/alfred` and pushed to private GitHub repo `MakoSlay/alfred`. |
 | cmux adapter can list current workspaces/surfaces | Complete | `src/cmux/index.ts` implements workspace/surface listing and fixture-backed target resolution. |
 | daemon can handle and confirm drafts | Complete | Task 005 adds pending drafts, `/confirm`, `/cancel`, `send that`, and cmux-backed confirmed sends. |
 | web dashboard shows recent activity | Complete | `GET /dashboard` renders surfaces, pending drafts, and recent event history via authenticated daemon APIs. |
-| Pi bridge is feature-flagged | Not Started | Requires Task 007. |
+| Pi bridge is feature-flagged | Complete | Bridge is opt-in through `ALFRED_DAEMON_ENABLED` / `PI_SMART_NOTIFY_ALFRED_DAEMON_ENABLED` and falls back to Pi-local behavior. |
 | Non-Pi entrypoint shape is defined | Complete | `docs/contracts/runtime-contracts.md` defines Pi, CLI, web UI, voice, text, and system sources. |
 
 ## Fresh-Eyes Review Checklist
 
 Before declaring the plan complete:
 
-- [ ] All task files have Goal, Scope, Checklist, Tests, and Completion Criteria.
-- [ ] Each task has 4-8 checklist items.
-- [ ] The current Pi extension remains usable without the new daemon.
-- [ ] The new runtime is outside the monolith and does not store secrets.
-- [ ] Quality gates are runnable in each touched repo.
-- [ ] `RALPH-PROMPT.md` contains no unreplaced template placeholders.
-- [ ] The completion promise is exactly `ALL 8 ALFRED-LOCAL TASKS COMPLETE`.
+- [x] All task files have Goal, Scope, Checklist, Tests, and Completion Criteria.
+- [x] Each task has 4-8 checklist items.
+- [x] The current Pi extension remains usable without the new daemon.
+- [x] The new runtime is outside the monolith and does not store secrets.
+- [x] Quality gates are runnable in each touched repo.
+- [x] `RALPH-PROMPT.md` contains no unreplaced template placeholders.
+- [x] The completion promise is exactly `ALL 8 ALFRED-LOCAL TASKS COMPLETE`.
