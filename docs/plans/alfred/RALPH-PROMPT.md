@@ -1,11 +1,11 @@
-# Ralph Prompt: CMUX Operator
+# Ralph Prompt: Alfred
 
-You are implementing the CMUX Operator plan.
+You are implementing the Alfred plan.
 
 The plan lives at:
 
 ```text
-/Users/muhammadabdul/work/cmux-operator/docs/plans/cmux-operator
+/Users/muhammadabdul/work/alfred/docs/plans/alfred
 ```
 
 The current live Alfred/Pi extension source repo is:
@@ -14,10 +14,10 @@ The current live Alfred/Pi extension source repo is:
 /Users/muhammadabdul/work/pi-smart-voice-notify
 ```
 
-The new standalone project should be created outside the Diversio monolith at:
+The standalone Alfred project lives outside the Diversio monolith at:
 
 ```text
-/Users/muhammadabdul/work/cmux-operator
+/Users/muhammadabdul/work/alfred
 ```
 
 ## Completion Promise
@@ -25,13 +25,13 @@ The new standalone project should be created outside the Diversio monolith at:
 Do not claim completion until this exact promise is true:
 
 ```text
-ALL 8 CMUX-OPERATOR TASKS COMPLETE
+ALL 8 ALFRED-LOCAL TASKS COMPLETE
 ```
 
 ## First Actions Every Iteration
 
 1. Inspect git state in `/Users/muhammadabdul/work/pi-smart-voice-notify`.
-2. If `/Users/muhammadabdul/work/cmux-operator` exists, inspect git state there too.
+2. If `/Users/muhammadabdul/work/alfred` exists, inspect git state there too.
 3. Read `PLAN.md` and identify the first incomplete task whose dependencies are complete.
 4. Read that task file fully before editing.
 5. Check recent commits to avoid repeating already-completed work.
@@ -47,10 +47,10 @@ ALL 8 CMUX-OPERATOR TASKS COMPLETE
 
 ## Architecture Intent
 
-Build a local orchestration platform powered by cmux:
+Build Alfred as a local personal assistant powered by cmux:
 
 ```text
-Pi extension / CLI / Web UI
+/alfred in Pi / CLI / Web UI / future voice input
         -> Alfred daemon/server
             -> Alfred core contracts and state
             -> cmux world model adapter
@@ -58,7 +58,7 @@ Pi extension / CLI / Web UI
             -> optional Pi bridge metadata
 ```
 
-cmux is the substrate for workspaces, tabs, surfaces, input, and transcript access. Alfred owns product policy: draft confirmation, loops, memory, action history, and web/dashboard UX.
+cmux is the substrate for workspaces, tabs, surfaces, input, and transcript access. Alfred owns product policy: draft confirmation, loops, memory, action history, and web/dashboard UX. Pi is the main first-class target/interface, but Alfred must not be architected as Pi-only.
 
 ## Required Quality Gates
 
@@ -71,10 +71,10 @@ npm run typecheck
 npm test
 ```
 
-When touching `/Users/muhammadabdul/work/cmux-operator`, run:
+When touching `/Users/muhammadabdul/work/alfred`, run:
 
 ```bash
-cd /Users/muhammadabdul/work/cmux-operator
+cd /Users/muhammadabdul/work/alfred
 npm run check
 npm run typecheck
 npm test
@@ -103,7 +103,7 @@ Complete 00X - Task Name
 - Summary bullet
 - Validation run
 
-Plan: cmux-operator
+Plan: alfred
 ```
 
 Do not commit generated secrets, local credentials, or machine-specific API keys.
@@ -134,5 +134,5 @@ Before saying the completion promise, verify:
 Only then say:
 
 ```text
-ALL 8 CMUX-OPERATOR TASKS COMPLETE
+ALL 8 ALFRED-LOCAL TASKS COMPLETE
 ```

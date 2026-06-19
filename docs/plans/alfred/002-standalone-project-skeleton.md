@@ -2,15 +2,15 @@
 
 ## Goal
 
-Create the new standalone CMUX Operator project outside the Diversio monolith.
+Create the new standalone Alfred project outside the Diversio monolith.
 
 ## Scope
 
-Initialize `/Users/muhammadabdul/work/cmux-operator` with TypeScript tooling, package scripts, tests, and an initial source layout. Do not move the live Pi extension yet.
+Initialize `/Users/muhammadabdul/work/alfred` with TypeScript tooling, package scripts, tests, and an initial source layout. Do not move the live Pi extension yet.
 
 ## Checklist
 
-- [x] Create `/Users/muhammadabdul/work/cmux-operator` as a separate git repository outside monolith.
+- [x] Create `/Users/muhammadabdul/work/alfred` as a separate git repository outside monolith.
 - [ ] Add package metadata and TypeScript configuration.
 - [ ] Add `npm run check`, `npm run typecheck`, and `npm test` scripts.
 - [ ] Add initial package/source layout for core, cmux adapter, daemon, CLI, and web/dashboard placeholders.
@@ -20,7 +20,7 @@ Initialize `/Users/muhammadabdul/work/cmux-operator` with TypeScript tooling, pa
 ## Tests
 
 ```bash
-cd /Users/muhammadabdul/work/cmux-operator
+cd /Users/muhammadabdul/work/alfred
 npm run check
 npm run typecheck
 npm test
@@ -44,8 +44,8 @@ npm test
 
 ## Notes
 
-- Local repository exists at `/Users/muhammadabdul/work/cmux-operator`.
-- Private GitHub remote exists at `MakoSlay/cmux-operator`.
+- Local repository exists at `/Users/muhammadabdul/work/alfred`.
+- Private GitHub remote exists at `MakoSlay/alfred`.
 - Package/tooling skeleton still needs to be implemented before this task is complete.
 
 ## Validation

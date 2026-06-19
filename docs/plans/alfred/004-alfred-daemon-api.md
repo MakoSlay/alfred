@@ -22,7 +22,7 @@ Implement a local-only server process in the standalone project. Prefer HTTP on 
 ## Tests
 
 ```bash
-cd /Users/muhammadabdul/work/cmux-operator
+cd /Users/muhammadabdul/work/alfred
 npm run check
 npm run typecheck
 npm test

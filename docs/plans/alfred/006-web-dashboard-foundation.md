@@ -21,7 +21,7 @@ Build a minimal local dashboard in the standalone project. It does not need poli
 ## Tests
 
 ```bash
-cd /Users/muhammadabdul/work/cmux-operator
+cd /Users/muhammadabdul/work/alfred
 npm run check
 npm run typecheck
 npm test

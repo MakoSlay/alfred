@@ -20,7 +20,7 @@ Build a cmux-backed world model in the new project. This should be generic enoug
 ## Tests
 
 ```bash
-cd /Users/muhammadabdul/work/cmux-operator
+cd /Users/muhammadabdul/work/alfred
 npm run check
 npm run typecheck
 npm test

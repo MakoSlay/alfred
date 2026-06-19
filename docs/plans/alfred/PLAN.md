@@ -1,17 +1,17 @@
-# CMUX Operator Plan
+# Alfred Plan
 
 ## Purpose
 
-Build Alfred's next-generation local orchestration platform as a standalone cmux-backed runtime while keeping the existing Pi extension usable and stable.
+Build Alfred as a standalone local cmux-backed personal assistant that can observe, coordinate, and safely command Pi, Codex, shells, and other terminal agents or processes visible to cmux.
 
-The current Pi extension remains the live product path. The new runtime is built separately, outside the Diversio monolith, and the Pi extension only bridges to it behind an opt-in flag once the server is useful.
+The current Pi extension remains the live `/alfred` path during parallel development. The long-term direction is inverted: Alfred owns the runtime, and Pi becomes one important interface/target rather than the place Alfred lives.
 
 ## Target Project Location
 
 Recommended standalone project path:
 
 ```text
-/Users/muhammadabdul/work/cmux-operator
+/Users/muhammadabdul/work/alfred
 ```
 
 This should be a personal/local tooling repo, not a Diversio monolith submodule. The existing source repo remains:
@@ -23,7 +23,7 @@ This should be a personal/local tooling repo, not a Diversio monolith submodule.
 ## Completion Promise
 
 ```text
-ALL 8 CMUX-OPERATOR TASKS COMPLETE
+ALL 8 ALFRED-LOCAL TASKS COMPLETE
 ```
 
 ## Quality Gates
@@ -36,7 +36,7 @@ npm run typecheck
 npm test
 ```
 
-Run equivalent gates in `/Users/muhammadabdul/work/cmux-operator` once that project exists:
+Run equivalent gates in `/Users/muhammadabdul/work/alfred` once that project exists:
 
 ```bash
 npm run check
@@ -54,6 +54,7 @@ If the new project initially lacks one of those scripts, add the missing script 
 - Do not expose action APIs beyond localhost/Unix socket without an explicit auth model.
 - Do not make the Pi extension depend on the new daemon by default.
 - Any new bridge from Pi to the daemon must be feature-flagged and fail closed back to the existing Pi-local behavior.
+- Keep `/alfred` as the current Pi entrypoint, but do not architect the daemon as if Pi is the only long-term input/output surface.
 - cmux should be treated as the substrate/control plane, not as the owner of Alfred product policy.
 
 ## Task Index
@@ -67,7 +68,7 @@ If the new project initially lacks one of those scripts, add the missing script 
 | 004 | Alfred daemon API | [004-alfred-daemon-api.md](004-alfred-daemon-api.md) | Not Started | 001, 002, 003 |
 | 005 | Draft-confirm and action execution | [005-draft-confirm-action-execution.md](005-draft-confirm-action-execution.md) | Not Started | 004 |
 | 006 | Web dashboard foundation | [006-web-dashboard-foundation.md](006-web-dashboard-foundation.md) | Not Started | 004, 005 |
-| 007 | Optional Pi bridge and parallel cutover | [007-optional-pi-bridge-parallel-cutover.md](007-optional-pi-bridge-parallel-cutover.md) | Not Started | 004, 005 |
+| 007 | Pi bridge and extraction path | [007-pi-bridge-extraction-path.md](007-pi-bridge-extraction-path.md) | Not Started | 004, 005 |
 
 ## External Reference Notes
 
@@ -87,18 +88,19 @@ Do not expand scope just because these projects have broader features. Use them 
 - Task 003 proves the new runtime can see cmux surfaces without Pi.
 - Tasks 004 and 005 make the runtime useful without touching the Pi extension.
 - Task 006 can progress once the daemon exposes state and history.
-- Task 007 must remain opt-in and should not happen before the daemon can safely answer `/handle` and `/confirm`.
+- Task 007 must remain opt-in, should not happen before the daemon can safely answer `/handle` and `/confirm`, and should move Alfred toward daemon ownership rather than deeper Pi-extension coupling.
 
 ## Progress Tracking
 
 | Gate | Status | Notes |
 |---|---|---|
 | Existing Pi extension still works | Not Verified | Run existing gates after any source changes. |
-| New standalone repo created outside monolith | Complete | Created at `/Users/muhammadabdul/work/cmux-operator` and pushed to private GitHub repo `MakoSlay/cmux-operator`. |
+| New standalone repo created outside monolith | Complete | Created at `/Users/muhammadabdul/work/alfred` and pushed to private GitHub repo `MakoSlay/alfred`. |
 | cmux adapter can list current workspaces/surfaces | Not Started | Requires Task 003. |
 | daemon can handle and confirm drafts | Not Started | Requires Tasks 004-005. |
 | web dashboard shows recent activity | Not Started | Requires Task 006. |
 | Pi bridge is feature-flagged | Not Started | Requires Task 007. |
+| Non-Pi entrypoint shape is defined | Not Started | Contracts should support CLI/web/future voice input, not only Pi `/alfred`. |
 
 ## Fresh-Eyes Review Checklist
 
@@ -110,4 +112,4 @@ Before declaring the plan complete:
 - [ ] The new runtime is outside the monolith and does not store secrets.
 - [ ] Quality gates are runnable in each touched repo.
 - [ ] `RALPH-PROMPT.md` contains no unreplaced template placeholders.
-- [ ] The completion promise is exactly `ALL 8 CMUX-OPERATOR TASKS COMPLETE`.
+- [ ] The completion promise is exactly `ALL 8 ALFRED-LOCAL TASKS COMPLETE`.

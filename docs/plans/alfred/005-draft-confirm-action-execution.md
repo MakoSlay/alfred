@@ -20,7 +20,7 @@ Implement deterministic draft-confirm state and action execution in the daemon. 
 ## Tests
 
 ```bash
-cd /Users/muhammadabdul/work/cmux-operator
+cd /Users/muhammadabdul/work/alfred
 npm run check
 npm run typecheck
 npm test
