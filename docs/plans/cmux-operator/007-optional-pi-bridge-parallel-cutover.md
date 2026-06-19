@@ -1,0 +1,65 @@
+# 007 - Optional Pi Bridge and Parallel Cutover
+
+## Goal
+
+Allow the existing Pi extension to optionally call the new Alfred daemon while preserving the current Pi-local implementation as the default fallback.
+
+## Scope
+
+Modify `pi-smart-voice-notify` only after the standalone daemon supports handle/state/confirm flows. The bridge must be opt-in and safe to disable instantly.
+
+## Checklist
+
+- [ ] Add feature flag/config for server-backed Alfred mode.
+- [ ] Implement a thin client from the Pi extension to the daemon.
+- [ ] Preserve existing in-extension Alfred behavior when the flag is off.
+- [ ] Fall back to existing behavior when the daemon is unavailable or returns an unsupported response.
+- [ ] Add tests for flag-off, flag-on success, and daemon-unavailable fallback paths.
+- [ ] Document reload and smoke-test steps for live Pi validation.
+
+## Tests
+
+In the standalone project:
+
+```bash
+cd /Users/muhammadabdul/work/cmux-operator
+npm run check
+npm run typecheck
+npm test
+```
+
+In the current Pi extension repo:
+
+```bash
+cd /Users/muhammadabdul/work/pi-smart-voice-notify
+npm run check
+npm run typecheck
+npm test
+```
+
+Optional live smoke after sync/reload:
+
+```text
+/alfred tell this chat hello from server-backed Alfred
+/alfred send that
+/alfred can you ask my power co session in this workspace to let me know what files i can delete now?
+```
+
+## Completion Criteria
+
+- [ ] Server-backed mode is opt-in only.
+- [ ] Existing Pi-local behavior remains default and tested.
+- [ ] Daemon failure does not break `/alfred`.
+- [ ] Validation results are recorded below.
+
+## Notes
+
+_To be filled during implementation._
+
+## Validation
+
+_To be filled during implementation._
+
+## Blockers
+
+_None currently._
