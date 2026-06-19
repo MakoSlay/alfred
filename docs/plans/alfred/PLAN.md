@@ -66,7 +66,7 @@ If the new project initially lacks one of those scripts, add the missing script 
 | 002 | Standalone project skeleton | [002-standalone-project-skeleton.md](002-standalone-project-skeleton.md) | Complete | 001 |
 | 003 | cmux world model adapter | [003-cmux-world-model-adapter.md](003-cmux-world-model-adapter.md) | Complete | 002 |
 | 004 | Alfred daemon API | [004-alfred-daemon-api.md](004-alfred-daemon-api.md) | Complete | 001, 002, 003 |
-| 005 | Draft-confirm and action execution | [005-draft-confirm-action-execution.md](005-draft-confirm-action-execution.md) | Not Started | 004 |
+| 005 | Draft-confirm and action execution | [005-draft-confirm-action-execution.md](005-draft-confirm-action-execution.md) | Complete | 004 |
 | 006 | Web dashboard foundation | [006-web-dashboard-foundation.md](006-web-dashboard-foundation.md) | Not Started | 004, 005 |
 | 007 | Pi bridge and extraction path | [007-pi-bridge-extraction-path.md](007-pi-bridge-extraction-path.md) | Not Started | 004, 005 |
 
@@ -97,7 +97,7 @@ Do not expand scope just because these projects have broader features. Use them 
 | Existing Pi extension still works | Not Verified | Run existing gates after any source changes. |
 | New standalone repo created outside monolith | Complete | Created at `/Users/muhammadabdul/work/alfred` and pushed to private GitHub repo `MakoSlay/alfred`. |
 | cmux adapter can list current workspaces/surfaces | Complete | `src/cmux/index.ts` implements workspace/surface listing and fixture-backed target resolution. |
-| daemon can handle and confirm drafts | In Progress | Task 004 adds authenticated `/handle`, `/state`, and `/surfaces`; draft confirmation execution waits for Task 005. |
+| daemon can handle and confirm drafts | Complete | Task 005 adds pending drafts, `/confirm`, `/cancel`, `send that`, and cmux-backed confirmed sends. |
 | web dashboard shows recent activity | Not Started | Requires Task 006. |
 | Pi bridge is feature-flagged | Not Started | Requires Task 007. |
 | Non-Pi entrypoint shape is defined | Complete | `docs/contracts/runtime-contracts.md` defines Pi, CLI, web UI, voice, text, and system sources. |
