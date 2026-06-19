@@ -69,6 +69,17 @@ If the new project initially lacks one of those scripts, add the missing script 
 | 006 | Web dashboard foundation | [006-web-dashboard-foundation.md](006-web-dashboard-foundation.md) | Not Started | 004, 005 |
 | 007 | Optional Pi bridge and parallel cutover | [007-optional-pi-bridge-parallel-cutover.md](007-optional-pi-bridge-parallel-cutover.md) | Not Started | 004, 005 |
 
+## External Reference Notes
+
+These references informed the plan shape:
+
+- MCP's host/client/server split supports keeping protocol/tool boundaries explicit rather than baking every tool into one monolith.
+- OpenHands' local agent server pattern validates separating client UI from agent/runtime execution with HTTP/WebSocket-style APIs and persisted events.
+- CLI Agent Orchestrator-style supervisor/worker patterns validate cmux/tmux-like surfaces as an orchestration substrate.
+- Localhost security research shows that browser-reachable local agent gateways need real origin/host/auth protections; localhost alone is not a sufficient trust boundary.
+
+Do not expand scope just because these projects have broader features. Use them as architecture guardrails, not as a mandate to build MCP, full sandboxing, or a polished web app in the first milestone.
+
 ## Dependency Notes
 
 - Task 000 prevents blind extraction by documenting what exists today.

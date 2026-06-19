@@ -11,7 +11,7 @@ Implement a local-only server process in the standalone project. Prefer HTTP on 
 ## Checklist
 
 - [ ] Add daemon entrypoint and local-only binding configuration.
-- [ ] Add a local auth/guard strategy appropriate for localhost or Unix socket use, including CSRF-safe behavior for the dashboard.
+- [ ] Add a local auth/guard strategy appropriate for localhost or Unix socket use, including CSRF-safe behavior for the dashboard, no permissive CORS, and DNS-rebinding-aware host/origin checks.
 - [ ] Implement `POST /handle` for natural-language requests.
 - [ ] Implement `GET /state` for pending drafts, active loops, recent targets, and health.
 - [ ] Implement `GET /surfaces` backed by the cmux adapter.
@@ -34,6 +34,7 @@ npm test
 - [ ] API responses use typed contracts.
 - [ ] State is process-owned and inspectable.
 - [ ] Action APIs are not exposed as an unauthenticated network control plane.
+- [ ] Browser-origin, CORS, and DNS-rebinding risks are explicitly covered in implementation notes/tests.
 - [ ] Validation results are recorded below.
 
 ## Notes
