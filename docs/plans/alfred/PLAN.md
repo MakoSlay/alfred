@@ -62,7 +62,7 @@ If the new project initially lacks one of those scripts, add the missing script 
 | Order | Task | File | Status | Depends On |
 |---:|---|---|---|---|
 | 000 | Orientation and boundary map | [000-orientation.md](000-orientation.md) | Complete | None |
-| 001 | Runtime contracts and event model | [001-runtime-contracts.md](001-runtime-contracts.md) | Not Started | 000 |
+| 001 | Runtime contracts and event model | [001-runtime-contracts.md](001-runtime-contracts.md) | Complete | 000 |
 | 002 | Standalone project skeleton | [002-standalone-project-skeleton.md](002-standalone-project-skeleton.md) | In Progress | 001 |
 | 003 | cmux world model adapter | [003-cmux-world-model-adapter.md](003-cmux-world-model-adapter.md) | Not Started | 002 |
 | 004 | Alfred daemon API | [004-alfred-daemon-api.md](004-alfred-daemon-api.md) | Not Started | 001, 002, 003 |
@@ -100,7 +100,7 @@ Do not expand scope just because these projects have broader features. Use them 
 | daemon can handle and confirm drafts | Not Started | Requires Tasks 004-005. |
 | web dashboard shows recent activity | Not Started | Requires Task 006. |
 | Pi bridge is feature-flagged | Not Started | Requires Task 007. |
-| Non-Pi entrypoint shape is defined | Not Started | Contracts should support CLI/web/future voice input, not only Pi `/alfred`. |
+| Non-Pi entrypoint shape is defined | Complete | `docs/contracts/runtime-contracts.md` defines Pi, CLI, web UI, voice, text, and system sources. |
 
 ## Fresh-Eyes Review Checklist
 
