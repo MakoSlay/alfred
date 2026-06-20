@@ -27,6 +27,34 @@ npm run typecheck
 npm test
 ```
 
+Start the local daemon:
+
+```bash
+ALFRED_LOCAL_TOKEN=dev-local-token npm run daemon
+```
+
+By default Alfred binds `127.0.0.1:47321` and serves the dashboard at:
+
+```text
+http://127.0.0.1:47321/dashboard
+```
+
+Daemon env config:
+
+- `ALFRED_HOST` — bind host, default `127.0.0.1`.
+- `ALFRED_PORT` — bind port, default `47321`.
+- `ALFRED_LOCAL_TOKEN` — local auth token for authenticated API calls.
+
+If `ALFRED_LOCAL_TOKEN` is not set, the daemon generates a process-local token, prints it once for the local operator, and does not persist it. The dashboard URL intentionally does not include tokens.
+
+Smoke commands:
+
+```bash
+curl -s http://127.0.0.1:47321/health
+curl -s -H 'x-alfred-auth: dev-local-token' http://127.0.0.1:47321/state
+curl -s -H 'x-alfred-auth: dev-local-token' http://127.0.0.1:47321/surfaces
+```
+
 Initial source layout:
 
 ```text

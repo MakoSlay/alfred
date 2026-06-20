@@ -1,4 +1,5 @@
 import type { AlfredSource } from "../contracts/runtime.ts";
+export * from "./daemon.ts";
 
 export function createCliSource(overrides: Partial<AlfredSource> = {}): AlfredSource {
 	return {
