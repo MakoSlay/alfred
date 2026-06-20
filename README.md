@@ -45,7 +45,7 @@ Daemon env config:
 - `ALFRED_PORT` — bind port, default `47321`.
 - `ALFRED_LOCAL_TOKEN` — local auth token for authenticated API calls.
 
-If `ALFRED_LOCAL_TOKEN` is not set, the daemon generates a process-local token, prints it once for the local operator, and does not persist it. The dashboard URL intentionally does not include tokens.
+If `ALFRED_LOCAL_TOKEN` is not set, the daemon generates a process-local token, prints it once for the local operator after startup succeeds, and does not persist it. The dashboard URL intentionally does not include tokens; enter the token manually in the dashboard.
 
 Smoke commands:
 

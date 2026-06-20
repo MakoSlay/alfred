@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
-import { createAlfredDaemon } from "../src/daemon/index.ts";
+import { createAlfredDaemon, defaultDaemonConfig } from "../src/daemon/index.ts";
 import { cliSource, piCommandSource, powerCodeTarget } from "../src/testing/fixtures.ts";
 import type { AlfredDraft, AlfredHandleRequest, AlfredTarget } from "../src/contracts/runtime.ts";
 import type { CmuxError } from "../src/cmux/index.ts";
@@ -271,6 +271,14 @@ test("failed sends do not claim success", async () => {
 	}
 });
 
+test("default daemon origins include unique loopback origins", () => {
+	const config = defaultDaemonConfig({ host: "127.0.0.1", port: 47321, authToken: "test-token" });
+	assert.deepEqual(config.allowedOrigins, ["http://127.0.0.1:47321", "http://localhost:47321", "http://[::1]:47321"]);
+
+	const ipv6Config = defaultDaemonConfig({ host: "::1", port: 47322, authToken: "test-token" });
+	assert.deepEqual(ipv6Config.allowedOrigins, ["http://[::1]:47322", "http://localhost:47322", "http://127.0.0.1:47322"]);
+});
+
 test("dashboard route renders local UI without exposing daemon state", async () => {
 	await withDaemon(async (baseUrl, token) => {
 		const dashboard = await fetch(`${baseUrl}/dashboard`);
@@ -285,6 +293,8 @@ test("dashboard route renders local UI without exposing daemon state", async () 
 		assert.match(html, /cancel/i);
 		assert.match(html, /x-alfred-auth/);
 		assert.equal(html.includes(token), false);
+		assert.equal(html.includes("URLSearchParams"), false);
+		assert.equal(html.includes("location.search"), false);
 
 		const badOrigin = await fetch(`${baseUrl}/dashboard`, { headers: { origin: "https://evil.test" } });
 		assert.equal(badOrigin.status, 403);

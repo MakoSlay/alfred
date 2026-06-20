@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { createAlfredDaemon, type AlfredDaemon, type AlfredDaemonConfig } from "../daemon/index.ts";
+import { formatHostForUrl } from "../lib/host-formatting.ts";
 
 export const DEFAULT_DAEMON_HOST = "127.0.0.1";
 export const DEFAULT_DAEMON_PORT = 47_321;
@@ -28,6 +29,7 @@ export interface RunDaemonCliOptions {
 	readonly createDaemon?: (config: Pick<AlfredDaemonConfig, "host" | "port" | "authToken">) => AlfredDaemon;
 	readonly randomToken?: () => string;
 	readonly signals?: DaemonSignalEmitter;
+	readonly shutdownTimeoutMs?: number;
 }
 
 export function parseDaemonCliConfig(
@@ -114,7 +116,7 @@ export async function runDaemonCli(options: RunDaemonCliOptions = {}): Promise<n
 		return 1;
 	}
 
-	await waitForShutdown(daemon, stdout, options.signals ?? process);
+	await waitForShutdown(daemon, stdout, options.signals ?? process, options.shutdownTimeoutMs ?? 5_000);
 	return 0;
 }
 
@@ -140,10 +142,6 @@ function parseAlfredPort(rawPort: string | undefined): number {
 	return port;
 }
 
-function formatHostForUrl(host: string): string {
-	return host.includes(":") ? `[${host.replace(/^\[/, "").replace(/\]$/, "")}]` : host;
-}
-
 function normalizedEnvValue(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	return trimmed ? trimmed : undefined;
@@ -157,6 +155,7 @@ async function waitForShutdown(
 	daemon: AlfredDaemon,
 	stdout: Pick<NodeJS.WriteStream, "write">,
 	processLike: DaemonSignalEmitter,
+	shutdownTimeoutMs: number,
 ): Promise<void> {
 	await new Promise<void>((resolve) => {
 		let stopping = false;
@@ -164,7 +163,7 @@ async function waitForShutdown(
 			if (stopping) return;
 			stopping = true;
 			stdout.write(`Received ${signal}; stopping Alfred daemon...\n`);
-			void daemon.stop()
+			void withTimeout(daemon.stop(), shutdownTimeoutMs, `Alfred daemon shutdown timed out after ${shutdownTimeoutMs}ms`)
 				.then(() => {
 					stdout.write("Alfred daemon stopped.\n");
 				})
@@ -177,6 +176,20 @@ async function waitForShutdown(
 		processLike.once("SIGTERM", shutdown);
 		processLike.once("SIGHUP", shutdown);
 	});
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+	let timeout: NodeJS.Timeout | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<T>((_, reject) => {
+				timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

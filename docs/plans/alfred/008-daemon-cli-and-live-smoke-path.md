@@ -86,7 +86,9 @@ Reload Pi and try:
 
 - Added `src/cli/daemon.ts` with no-network testable seams for env parsing, startup message formatting, startup error formatting, and `runDaemonCli()`.
 - Added `npm run daemon` as `node --experimental-strip-types src/cli/daemon.ts`.
-- Added `test/cli.test.ts` coverage for defaults, env overrides, invalid ports, generated-token output, configured-token redaction, bind-in-use messaging, and startup failure exit behavior.
+- Added `test/cli.test.ts` coverage for defaults, env overrides, loopback-only host validation, IPv6 URL formatting, invalid ports, generated-token output, configured-token redaction, bind-in-use messaging, startup failure exit behavior, all shutdown signals, and shutdown timeout handling.
+- Removed dashboard `?token=` prefill support so tokens are not encouraged in copy-pastable URLs.
+- Hardened daemon startup/shutdown with startup timeout, post-startup server error handling, idle/all-connection close support, and shared host URL formatting.
 - Updated `README.md` with daemon env config and curl smoke commands.
 
 ## Live Smoke Findings
@@ -185,7 +187,7 @@ cd /Users/muhammadabdul/work/alfred
 npm run check
 ```
 
-Result: passed. `npm run check` ran TypeScript typecheck and 27 Node tests, including 8 CLI-focused tests in `test/cli.test.ts`.
+Result: passed. `npm run check` ran TypeScript typecheck and 32 Node tests, including CLI shutdown-signal/timeout tests and daemon origin/dashboard safety tests.
 
 Pi extension gates were not run because Task 008 did not modify `/Users/muhammadabdul/work/pi-smart-voice-notify`.
 

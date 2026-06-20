@@ -11,6 +11,8 @@ import {
 	runDaemonCli,
 } from "../src/cli/daemon.ts";
 
+type TestDaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
+
 test("daemon CLI env parsing uses safe defaults and generated token", () => {
 	const config = parseDaemonCliConfig({}, () => "generated-test-token");
 
@@ -38,10 +40,13 @@ test("daemon CLI env parsing accepts loopback host, port, and configured token",
 
 test("daemon CLI formats IPv6 loopback dashboard URLs", () => {
 	const config = parseDaemonCliConfig({ ALFRED_HOST: "::1", ALFRED_PORT: "47322" }, () => "generated-token");
+	const bracketedConfig = parseDaemonCliConfig({ ALFRED_HOST: "[::1]", ALFRED_PORT: "47322" }, () => "generated-token");
 
 	assert.equal(config.host, "::1");
+	assert.equal(bracketedConfig.host, "::1");
 	assert.equal(config.dashboardUrl, "http://[::1]:47322/dashboard");
 	assert.match(formatDaemonStartupMessage(config), /Listening: http:\/\/\[::1\]:47322/);
+	assert.match(formatDaemonStartedMessage(config, { host: config.host, port: config.port }), /Alfred daemon ready on http:\/\/\[::1\]:47322/);
 });
 
 test("daemon CLI rejects non-loopback ALFRED_HOST clearly", () => {
@@ -145,44 +150,75 @@ test("daemon CLI exits nonzero for startup failure without leaking generated tok
 });
 
 test("daemon CLI handles shutdown signals and stops the daemon", async () => {
+	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] satisfies TestDaemonSignal[]) {
+		let stdout = "";
+		let stopped = false;
+		const listeners = new Map<TestDaemonSignal, (signal: NodeJS.Signals) => void>();
+		const signals = {
+			once(signalName: TestDaemonSignal, listener: (signal: NodeJS.Signals) => void) {
+				listeners.set(signalName, listener);
+				return signals;
+			},
+		};
+		const daemonConfig: AlfredDaemonConfig = {
+			host: "127.0.0.1",
+			port: 47321,
+			authToken: "configured-token",
+			allowedHosts: [],
+			allowedOrigins: [],
+			maxBodyBytes: 1,
+		};
+
+		const run = runDaemonCli({
+			env: { ALFRED_LOCAL_TOKEN: "configured-token" },
+			stdout: { write: (chunk: string | Uint8Array) => { stdout += String(chunk); return true; } },
+			stderr: { write: () => true },
+			signals,
+			createDaemon: (config) => ({
+				config: { ...daemonConfig, ...config },
+				async start() { return { host: config.host, port: config.port, authToken: config.authToken }; },
+				async stop() { stopped = true; },
+			}),
+		});
+
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(listeners.has("SIGINT"), true);
+		assert.equal(listeners.has("SIGTERM"), true);
+		assert.equal(listeners.has("SIGHUP"), true);
+		listeners.get(signal)?.(signal);
+
+		assert.equal(await run, 0);
+		assert.equal(stopped, true);
+		assert.match(stdout, new RegExp(`Received ${signal}; stopping Alfred daemon`));
+		assert.match(stdout, /Alfred daemon stopped/);
+	}
+});
+
+test("daemon CLI reports a cleanup error if shutdown times out", async () => {
 	let stdout = "";
-	let stopped = false;
-	const listeners = new Map<string, (signal: NodeJS.Signals) => void>();
+	const listeners = new Map<TestDaemonSignal, (signal: NodeJS.Signals) => void>();
 	const signals = {
-		once(signal: "SIGINT" | "SIGTERM" | "SIGHUP", listener: (signal: NodeJS.Signals) => void) {
-			listeners.set(signal, listener);
+		once(signalName: TestDaemonSignal, listener: (signal: NodeJS.Signals) => void) {
+			listeners.set(signalName, listener);
 			return signals;
 		},
 	};
-	const daemonConfig: AlfredDaemonConfig = {
-		host: "127.0.0.1",
-		port: 47321,
-		authToken: "configured-token",
-		allowedHosts: [],
-		allowedOrigins: [],
-		maxBodyBytes: 1,
-	};
-
 	const run = runDaemonCli({
 		env: { ALFRED_LOCAL_TOKEN: "configured-token" },
 		stdout: { write: (chunk: string | Uint8Array) => { stdout += String(chunk); return true; } },
 		stderr: { write: () => true },
 		signals,
+		shutdownTimeoutMs: 1,
 		createDaemon: (config) => ({
-			config: { ...daemonConfig, ...config },
+			config: { ...config, allowedHosts: [], allowedOrigins: [], maxBodyBytes: 1 },
 			async start() { return { host: config.host, port: config.port, authToken: config.authToken }; },
-			async stop() { stopped = true; },
+			async stop() { await new Promise(() => undefined); },
 		}),
 	});
 
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(listeners.has("SIGINT"), true);
-	assert.equal(listeners.has("SIGTERM"), true);
-	assert.equal(listeners.has("SIGHUP"), true);
 	listeners.get("SIGTERM")?.("SIGTERM");
 
 	assert.equal(await run, 0);
-	assert.equal(stopped, true);
-	assert.match(stdout, /Received SIGTERM; stopping Alfred daemon/);
-	assert.match(stdout, /Alfred daemon stopped/);
+	assert.match(stdout, /Alfred daemon stopped with cleanup error: Alfred daemon shutdown timed out after 1ms/);
 });

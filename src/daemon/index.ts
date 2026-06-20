@@ -18,6 +18,7 @@ import type {
 } from "../contracts/runtime.ts";
 import { DEFAULT_DRAFT_TTL_MS, redactedText, sourceHasCapabilities } from "../contracts/runtime.ts";
 import { createCmuxWorldModelAdapter, type CmuxResult, type CmuxWorldModelAdapter } from "../cmux/index.ts";
+import { formatHostForUrl } from "../lib/host-formatting.ts";
 
 export interface AlfredDaemonConfig {
 	readonly host: string;
@@ -83,13 +84,9 @@ export function defaultDaemonConfig(overrides: Partial<AlfredDaemonConfig> = {})
 		port,
 		authToken: overrides.authToken ?? process.env.ALFRED_LOCAL_TOKEN ?? randomBytes(24).toString("base64url"),
 		allowedHosts: overrides.allowedHosts ?? ["127.0.0.1", "localhost", "::1", "[::1]"],
-		allowedOrigins: overrides.allowedOrigins ?? [`http://${originHost}:${port}`, `http://localhost:${port}`, `http://127.0.0.1:${port}`],
+		allowedOrigins: overrides.allowedOrigins ?? [...new Set([`http://${originHost}:${port}`, `http://localhost:${port}`, `http://127.0.0.1:${port}`, `http://[::1]:${port}`])],
 		maxBodyBytes: overrides.maxBodyBytes ?? 128 * 1024,
 	};
-}
-
-function formatHostForUrl(host: string): string {
-	return host.includes(":") ? `[${host.replace(/^\[/, "").replace(/\]$/, "")}]` : host;
 }
 
 export function createAlfredDaemon(
@@ -108,9 +105,19 @@ export function createAlfredDaemon(
 		config: resolvedConfig,
 		async start() {
 			await new Promise<void>((resolve, reject) => {
-				server.once("error", reject);
+				const timeout = setTimeout(() => {
+					server.off("error", onStartupError);
+					reject(new Error("Startup timed out after 10s"));
+				}, 10_000);
+				const onStartupError = (error: Error) => {
+					clearTimeout(timeout);
+					reject(error);
+				};
+				server.once("error", onStartupError);
 				server.listen(resolvedConfig.port, resolvedConfig.host, () => {
-					server.off("error", reject);
+					clearTimeout(timeout);
+					server.off("error", onStartupError);
+					server.on("error", () => undefined);
 					resolve();
 				});
 			});
@@ -120,7 +127,12 @@ export function createAlfredDaemon(
 		async stop() {
 			if (!server.listening) return;
 			await new Promise<void>((resolve, reject) => {
-				server.close((error) => error ? reject(error) : resolve());
+				const forceClose = setTimeout(() => server.closeAllConnections(), 5_000);
+				server.close((error) => {
+					clearTimeout(forceClose);
+					error ? reject(error) : resolve();
+				});
+				server.closeIdleConnections();
 			});
 		},
 	};
@@ -864,8 +876,7 @@ li { border: 1px solid color-mix(in srgb, CanvasText 12%, transparent); border-r
   const surfaces = document.getElementById('surfaces');
   const drafts = document.getElementById('drafts');
   const events = document.getElementById('events');
-  const queryToken = new URLSearchParams(location.search).get('token') || '';
-  tokenInput.value = queryToken || localStorage.getItem('alfred.localToken') || '';
+  tokenInput.value = localStorage.getItem('alfred.localToken') || '';
 
   function setStatus(message, isError = false) {
     status.textContent = message;
