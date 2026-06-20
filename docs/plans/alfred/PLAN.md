@@ -22,13 +22,19 @@ This should be a personal/local tooling repo, not a Diversio monolith submodule.
 
 ## Completion Promise
 
-Foundation promise reached:
+Foundation promise reached for tasks 000-007:
 
 ```text
 ALL 8 ALFRED-LOCAL TASKS COMPLETE
 ```
 
-Next-phase planning starts from task 008. The next phase is complete when Alfred can be started and smoked as a real local daemon, then safely expanded toward daemon-owned planning, loops, persistence, and dashboard polish.
+Task 008 is also complete and established the live daemon start path. The current daemon-expansion phase covers tasks 009-013. Its completion promise is:
+
+```text
+ALL 5 ALFRED-DAEMON-EXPANSION TASKS COMPLETE
+```
+
+This phase is complete when Alfred has daemon-owned planning, loop foundation, local persistence rules/storage, dashboard polish, and opt-in Pi loop bridge migration with fallback safety.
 
 ## Quality Gates
 
@@ -98,9 +104,9 @@ Do not expand scope just because these projects have broader features. Use them 
 - Task 006 can progress once the daemon exposes state and history.
 - Task 007 must remain opt-in, should not happen before the daemon can safely answer `/handle` and `/confirm`, and should move Alfred toward daemon ownership rather than deeper Pi-extension coupling.
 - Task 008 is the first next-phase implementation target because all later live work needs a polished daemon start path.
-- Task 009 should reuse Pi-local planner hardening ideas while keeping daemon contracts source-agnostic.
-- Task 010 establishes daemon-owned loop contracts and a manager foundation only; Pi bridge loop migration is split into Task 013 so the foundation remains atomic.
-- Task 011 should decide retention/redaction before durable storage is added. Loop-state persistence should coordinate with Task 010 but does not block the initial storage decision.
+- Task 009 should reuse Pi-local planner hardening ideas while keeping daemon contracts source-agnostic. The planner augments the existing deterministic draft parser; deterministic matching remains the fallback when no planner is configured or planner output is invalid.
+- Task 010 establishes daemon-owned loop contracts and a manager foundation only; Pi bridge loop migration is split into Task 013 so the foundation remains atomic. The first autonomous-send approval model is the explicit `loop.autonomousSend` capability; without it, loop sends must become pending drafts.
+- Task 011 should decide retention/redaction before durable storage is added. The initial storage direction is app-dir JSONL audit events plus small metadata files; pending drafts remain session-only unless a later task documents a stronger safety rationale. Loop-state persistence should coordinate with Task 010 but does not block the initial storage decision.
 - Task 012 is intentionally after daemon basics; dashboard polish should not relax local security protections. Loop/persistence display can remain placeholder-only until Tasks 010 and 011 land.
 - Task 013 moves Pi's autonomous loop bridge path to daemon ownership after the daemon loop manager foundation exists.
 
@@ -123,7 +129,7 @@ Do not expand scope just because these projects have broader features. Use them 
 ## Completion
 
 - [x] Foundation milestone is complete: tasks 000-007 are checked and the promise `ALL 8 ALFRED-LOCAL TASKS COMPLETE` has been reached.
-- [ ] Next-phase milestone is complete: tasks 008-013 are checked.
+- [ ] Daemon-expansion milestone is complete: tasks 009-013 are checked and `ALL 5 ALFRED-DAEMON-EXPANSION TASKS COMPLETE` is true.
 - [x] Standalone Alfred gates pass for each standalone task that changes code.
 - [ ] Pi extension gates pass for each task that changes `/Users/muhammadabdul/work/pi-smart-voice-notify`.
 - [ ] Live smoke findings are recorded for daemon CLI, dashboard, and opt-in Pi bridge paths.
@@ -139,6 +145,7 @@ Foundation review before declaring the first eight tasks complete:
 - [x] Quality gates are runnable in each touched repo.
 - [x] `RALPH-PROMPT.md` contains no unreplaced template placeholders.
 - [x] The foundation completion promise is `ALL 8 ALFRED-LOCAL TASKS COMPLETE`.
+- [x] The daemon-expansion completion promise is defined as `ALL 5 ALFRED-DAEMON-EXPANSION TASKS COMPLETE`.
 
 Next-phase planning review:
 

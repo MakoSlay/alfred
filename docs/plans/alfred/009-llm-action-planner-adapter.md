@@ -15,7 +15,7 @@ Introduce planner interfaces and an initial adapter informed by the Pi-local Alf
 
 **In scope:**
 
-- A planner interface that consumes `AlfredHandleRequest`, visible targets, policy, and source capabilities.
+- A planner interface that consumes `AlfredPlannerInput` built from `AlfredHandleRequest`, visible targets, policy, and source capabilities.
 - A standalone adapter module that can later call the chosen local/remote LLM provider.
 - Deterministic fallback behavior when no planner is configured or planner output is unsupported.
 - Strict parsing/validation for proposed actions.
@@ -29,6 +29,45 @@ Introduce planner interfaces and an initial adapter informed by the Pi-local Alf
 - New direct-send shortcuts.
 - Removing the existing Pi-local planner before daemon parity is proven.
 
+## Interface Sketch
+
+Task 009 should implement a daemon-owned planner seam close to this shape:
+
+```ts
+export interface AlfredPlannerInput {
+  requestId: AlfredId;
+  source: AlfredSource;
+  inputText: string;
+  currentWorkspaceRef?: AlfredRef;
+  visibleTargets: AlfredTarget[];
+  allowedCapabilities: AlfredCapability[];
+  maxInputChars: number;
+}
+
+export type AlfredPlannerIntent =
+  | { kind: "none"; reason?: string }
+  | { kind: "draft_message"; targetRef?: AlfredRef; targetName?: string; message: string };
+
+export interface AlfredPlannerResult {
+  ok: boolean;
+  intent?: AlfredPlannerIntent;
+  errors?: AlfredError[];
+  sanitizedInputSummary: RedactedText;
+}
+
+export interface AlfredPlanner {
+  plan(input: AlfredPlannerInput): Promise<AlfredPlannerResult>;
+}
+```
+
+Initial implementation rules:
+
+- Do not call a provider directly from `src/daemon/index.ts`; inject/use an `AlfredPlanner` dependency.
+- Do not store raw provider output in daemon events. Store only validated intent summaries and structured errors.
+- Planner input must be built from request text, current refs, and target labels/refs only; raw transcripts/session files are excluded by default.
+- Apply a size limit before planner calls. Start with `request.policy?.maxTranscriptChars` only as an upper-bound compatibility field, but do not include transcripts yet.
+- Supported first output is `draft_message`; unsupported or direct-send-like output fails closed and deterministic matching remains fallback.
+
 ## Checklist
 
 - [ ] Read the current Pi-local planner in `/Users/muhammadabdul/work/pi-smart-voice-notify/src/alfred-adapters/llm.ts` and its tests for reusable prompt/parse/safety ideas.
@@ -37,7 +76,7 @@ Introduce planner interfaces and an initial adapter informed by the Pi-local Alf
 - [ ] Wire `/handle` to use the planner only after source capability checks and cmux target refresh.
 - [ ] Convert planner send intents into pending drafts that require confirmation before execution.
 - [ ] Reject or ignore malformed, direct-send, cross-target, or capability-missing planner output with structured events/errors that do not persist raw unsafe provider output.
-- [ ] Preserve deterministic draft matching as a fallback and as a testable baseline.
+- [ ] Preserve deterministic draft matching as a fallback and as a testable baseline; planner augments but does not replace the existing deterministic parser.
 - [ ] Add fixture-backed tests for prose-wrapped JSON, proposal salvage if retained, unsupported output, target ambiguity, and planner-input redaction.
 
 ## Tests
@@ -79,7 +118,8 @@ Manual smoke after 008 is complete:
 - Keep daemon contracts source-agnostic: Pi, CLI, dashboard, and future voice/text clients should all call the same shape.
 - Reuse hardening ideas from Pi-local Alfred, not Pi extension ownership.
 - Do not claim an action happened until `cmux` send succeeds.
+- Existing deterministic daemon parsing in `resolveDraftIntent()` remains the fallback for known patterns and for planner-unavailable paths.
 
 ## Blockers
 
-- Best started after 008 so live daemon smoke exists before planner behavior expands.
+_None currently._

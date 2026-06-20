@@ -33,6 +33,7 @@ test("capability helpers distinguish privileged sends from read-only CLI", () =>
 	const source = cliSource();
 
 	assert.equal(isPrivilegedCapability("surface.send"), true);
+	assert.equal(isPrivilegedCapability("loop.autonomousSend"), true);
 	assert.equal(isPrivilegedCapability("world.read"), false);
 	assert.equal(sourceHasCapabilities(source, ["world.read"]), true);
 	assert.equal(sourceHasCapabilities(source, ["surface.send"]), false);

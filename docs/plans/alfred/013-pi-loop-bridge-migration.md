@@ -89,7 +89,8 @@ Then disable daemon mode and verify Pi-local fallback still works.
 
 - This task exists because task 010 was intentionally narrowed to daemon loop foundation work.
 - Keep Pi bridge code thin. Product policy should live in Alfred daemon/core, not in the Pi extension.
+- The manual smoke phrase that asks Alfred to find and manage a named session is most informative after both Task 009 (planner) and Task 010 (loop manager) are complete. Task 013 only hard-depends on Task 010 because bridge routing can still preserve fallback without planner parity.
 
 ## Blockers
 
-- Requires task 010's daemon loop API/control shape.
+_None currently; requires task 010's daemon loop API/control shape as listed above._

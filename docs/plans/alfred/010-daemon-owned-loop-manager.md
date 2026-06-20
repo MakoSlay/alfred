@@ -29,13 +29,49 @@ Define and implement the daemon-side loop manager foundation by adapting concept
 - Changing Pi loop ownership or removing Pi-local loop code before daemon loop behavior has live confidence.
 - Voice-specific loop UX.
 
+## Interface Sketch
+
+Task 010 should implement a daemon-owned loop manager close to this shape:
+
+```ts
+export interface AlfredLoopStartRequest {
+  requestId: AlfredId;
+  source: AlfredSource;
+  targetRef: AlfredRef;
+  goal: RedactedText;
+  maxTurns: number;
+  pollIntervalMs: number;
+  allowedCapabilities: AlfredCapability[];
+}
+
+export type AlfredLoopDecision =
+  | { kind: "wait"; reason?: string }
+  | { kind: "draft_reply"; message: string }
+  | { kind: "done"; summary: string }
+  | { kind: "needs_user"; summary: string };
+
+export interface AlfredLoopManager {
+  start(request: AlfredLoopStartRequest): Promise<AlfredHandleResponse>;
+  poll(loopId: AlfredId): Promise<AlfredLoopDecision>;
+  stop(loopId: AlfredId, options?: { interruptTarget?: boolean }): Promise<AlfredHandleResponse>;
+  status(loopId?: AlfredId): AlfredLoopSummary | null;
+}
+```
+
+Autonomous-send approval model for the first pass:
+
+- Add/use a distinct privileged capability named `loop.autonomousSend`.
+- If the loop source lacks `loop.autonomousSend`, every loop-originated reply must create a pending draft and wait for confirmation.
+- `loop.manage` can start/stop/status loops, but it does not imply autonomous sending.
+- Per-loop approval tokens are out of scope for Task 010 unless the task file is explicitly revised before implementation.
+
 ## Checklist
 
 - [ ] Read Pi loop ownership code in `src/index.ts` (`startDelegationLoop`, `scheduleDelegationLoopPoll`, `stopDelegationLoop`) and identify daemon-portable concepts.
 - [ ] Define loop contracts for start/stop/status, target refs, poll cadence, stop conditions, and allowed capabilities.
 - [ ] Add daemon loop manager module with explicit lifecycle state and no hidden global sends.
 - [ ] Expose minimal daemon API/control path for loop start/stop/status for future clients and dashboard visibility.
-- [ ] Define a concrete autonomous loop-send approval model before any loop send can bypass draft confirmation, such as a dedicated `loop.autonomousSend` capability or per-loop approval token.
+- [ ] Implement the concrete `loop.autonomousSend` approval capability before any loop send can bypass draft confirmation.
 - [ ] Ensure loop sends use draft-confirm unless the explicit loop-send approval model is present and tested.
 - [ ] Add tests for start, poll scheduling seam, stop, target disappearance, send failure, capability denial, and missing autonomous-send approval.
 - [ ] Document the Pi bridge migration outline and rollback requirements for task 013 without modifying Pi behavior here.
@@ -78,8 +114,8 @@ Manual smoke after daemon loop support exists:
 
 - This task should not pretend loop extraction is complete; task 013 covers making Pi a loop client in daemon mode.
 - Prefer explicit timer seams in tests so loop behavior does not depend on wall-clock sleeps.
+- Loop planning may use Task 009's planner, but loop lifecycle/state must remain testable without a live provider.
 
 ## Blockers
 
-- Requires 008 for live daemon operation.
-- Should follow or coordinate with 009 if loop planning depends on LLM-generated next actions.
+_None currently; dependencies are captured above._

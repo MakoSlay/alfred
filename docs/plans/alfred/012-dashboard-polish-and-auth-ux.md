@@ -73,6 +73,4 @@ Verify the dashboard can refresh state, show surfaces/events, and confirm/cancel
 
 ## Blockers
 
-- Best started after 008.
-- Loop display depends on 010.
-- Persistence display/history expectations depend on 011.
+_None currently; loop display depends on 010 and persistence/history expectations depend on 011._

@@ -301,6 +301,24 @@ test("dashboard route renders local UI without exposing daemon state", async () 
 	});
 });
 
+test("daemon reports contract error codes for unsupported and missing routes", async () => {
+	await withDaemon(async (baseUrl, token) => {
+		const directSend = await fetch(`${baseUrl}/send`, {
+			method: "POST",
+			headers: { ...authHeaders(token), "content-type": "application/json" },
+			body: JSON.stringify({}),
+		});
+		assert.equal(directSend.status, 501);
+		const directSendBody = await directSend.json() as { error: { code: string } };
+		assert.equal(directSendBody.error.code, "unsupported_action");
+
+		const missing = await fetch(`${baseUrl}/missing`, { headers: authHeaders(token) });
+		assert.equal(missing.status, 404);
+		const missingBody = await missing.json() as { error: { code: string } };
+		assert.equal(missingBody.error.code, "not_found");
+	});
+});
+
 test("daemon rejects DNS rebinding and cross-origin browser-style requests", async () => {
 	await withDaemon(async (baseUrl, token) => {
 		const badHost = await rawGetWithHost(baseUrl, "/state", "evil.test", token);

@@ -26,6 +26,7 @@ export type AlfredCapability =
   | "surface.send"
   | "workspace.send"
   | "loop.manage"
+  | "loop.autonomousSend"
   | "history.read"
   | "history.write"
   | "config.read";
@@ -214,6 +215,7 @@ export interface AlfredStatusAction extends AlfredBaseAction {
 
 Action semantics:
 
+- The daemon may include deterministic draft-intent parsing for known safe command patterns. A daemon planner may augment this path, but deterministic parsing remains the fallback when no planner is configured or planner output is malformed/unsupported.
 - `draft`: creates pending text for a target; never sends.
 - `confirm`: authorizes a pending draft or pending loop start by id.
 - `cancel`: cancels a pending draft or loop.
@@ -345,6 +347,8 @@ export interface AlfredError {
     | "loop_not_found"
     | "cmux_unavailable"
     | "llm_unavailable"
+    | "unsupported_action"
+    | "not_found"
     | "internal_error";
   message: string;
   retryable: boolean;
@@ -361,7 +365,9 @@ Capability rules:
 
 - Sources receive capabilities from local policy, not from self-declared request fields alone.
 - Browser-originated sources start with read-only capabilities until host/origin/auth/CSRF checks pass.
-- `surface.send`, `workspace.send`, and `loop.manage` are privileged.
+- `surface.send`, `workspace.send`, `loop.manage`, and `loop.autonomousSend` are privileged.
+- `loop.manage` permits loop lifecycle control; it does not imply permission for autonomous loop-originated sends.
+- `loop.autonomousSend` is the first explicit approval model for loop-originated sends that bypass draft-confirm. Without it, loop replies must become pending drafts.
 - `send` and `loop.start` require target capability plus source capability.
 - Missing daemon, missing cmux, denied capability, or expired confirmation must fail closed.
 - Pi bridge fallback is `local-pi` only when the Pi extension has explicitly enabled bridge mode and the daemon is absent/unusable before any daemon-side action was accepted.

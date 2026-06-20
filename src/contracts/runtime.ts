@@ -11,6 +11,7 @@ export type AlfredCapability =
 	| "surface.send"
 	| "workspace.send"
 	| "loop.manage"
+	| "loop.autonomousSend"
 	| "history.read"
 	| "history.write"
 	| "config.read";
@@ -252,6 +253,8 @@ export interface AlfredError {
 		| "loop_not_found"
 		| "cmux_unavailable"
 		| "llm_unavailable"
+		| "unsupported_action"
+		| "not_found"
 		| "internal_error";
 	message: string;
 	retryable: boolean;
@@ -268,7 +271,7 @@ export function redactedText(value: string, redaction: RedactionMetadata = { sta
 }
 
 export function isPrivilegedCapability(capability: AlfredCapability): boolean {
-	return capability === "surface.send" || capability === "workspace.send" || capability === "loop.manage";
+	return capability === "surface.send" || capability === "workspace.send" || capability === "loop.manage" || capability === "loop.autonomousSend";
 }
 
 export function sourceHasCapabilities(source: AlfredSource, required: readonly AlfredCapability[]): boolean {

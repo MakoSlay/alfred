@@ -30,9 +30,20 @@ Move beyond process-only memory for daemon state where appropriate, but make ret
 - Storing raw terminal transcripts by default.
 - Full database migrations beyond what is needed for local development.
 
+## Initial Storage Direction
+
+Use this default unless implementation evidence shows it is unsafe:
+
+- App directory: `~/.alfred/` by default, overrideable later by env/config if needed.
+- Event log: JSONL file such as `~/.alfred/events.jsonl` for redacted audit events only.
+- Metadata: small JSON files for target memory and storage metadata.
+- Pending drafts: session-only for the first persistence pass; do not persist draft text unless a later task documents a safety rationale.
+- Raw transcripts/session files: never persisted by default.
+- SQLite is deferred until query complexity, migrations, or concurrency needs justify it.
+
 ## Checklist
 
-- [ ] Write a short storage decision note comparing JSONL, SQLite, and app-dir layout for Alfred's current needs.
+- [ ] Write a short storage decision note comparing JSONL, SQLite, and app-dir layout for Alfred's current needs, starting from the app-dir JSONL default above.
 - [ ] Define retention/redaction rules for events, target memory, loop state, pending drafts, and transcript-like data.
 - [ ] Implement the selected storage adapter behind a daemon-owned interface.
 - [ ] Persist only approved fields and avoid raw secrets/transcripts unless explicitly redacted and justified.
@@ -69,8 +80,8 @@ Manual smoke after implementation:
 
 - Treat transcript/history data as sensitive local data even when it originated on localhost.
 - The safest initial default is to persist metadata and short audit events, not raw terminal contents.
+- If task 010 is not complete when 011 starts, explicitly defer loop-state persistence and persist only non-loop metadata/events.
 
 ## Blockers
 
-- Should follow 008 so daemon lifecycle and startup paths are stable.
-- Loop-state persistence depends on task 010's contract shape and should be explicitly deferred if 010 is not ready.
+_None currently; loop-state persistence should be deferred if task 010's contract shape is not ready._
