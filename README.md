@@ -41,7 +41,7 @@ http://127.0.0.1:47321/dashboard
 
 Daemon env config:
 
-- `ALFRED_HOST` — bind host, default `127.0.0.1`.
+- `ALFRED_HOST` — loopback bind host (`127.0.0.1`, `localhost`, or `::1`), default `127.0.0.1`.
 - `ALFRED_PORT` — bind port, default `47321`.
 - `ALFRED_LOCAL_TOKEN` — local auth token for authenticated API calls.
 

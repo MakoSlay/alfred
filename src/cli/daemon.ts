@@ -15,25 +15,31 @@ export interface DaemonCliConfig {
 	readonly daemonConfig: Pick<AlfredDaemonConfig, "host" | "port" | "authToken">;
 }
 
+type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
+
+export interface DaemonSignalEmitter {
+	once(signal: DaemonSignal, listener: (signal: NodeJS.Signals) => void): unknown;
+}
+
 export interface RunDaemonCliOptions {
 	readonly env?: NodeJS.ProcessEnv;
 	readonly stdout?: Pick<NodeJS.WriteStream, "write">;
 	readonly stderr?: Pick<NodeJS.WriteStream, "write">;
 	readonly createDaemon?: (config: Pick<AlfredDaemonConfig, "host" | "port" | "authToken">) => AlfredDaemon;
 	readonly randomToken?: () => string;
-	readonly signals?: NodeJS.Process;
+	readonly signals?: DaemonSignalEmitter;
 }
 
 export function parseDaemonCliConfig(
 	env: NodeJS.ProcessEnv = process.env,
 	randomToken: () => string = createLocalAuthToken,
 ): DaemonCliConfig {
-	const host = normalizedEnvValue(env.ALFRED_HOST) ?? DEFAULT_DAEMON_HOST;
+	const host = parseAlfredHost(env.ALFRED_HOST);
 	const port = parseAlfredPort(env.ALFRED_PORT);
 	const configuredToken = normalizedEnvValue(env.ALFRED_LOCAL_TOKEN);
 	const tokenSource: DaemonTokenSource = configuredToken ? "env" : "generated";
 	const authToken = configuredToken ?? randomToken();
-	const dashboardUrl = `http://${host}:${port}/dashboard`;
+	const dashboardUrl = `http://${formatHostForUrl(host)}:${port}/dashboard`;
 
 	return {
 		host,
@@ -48,30 +54,36 @@ export function parseDaemonCliConfig(
 export function formatDaemonStartupMessage(config: DaemonCliConfig): string {
 	const lines = [
 		"Alfred daemon starting",
-		`Listening: http://${config.host}:${config.port}`,
+		`Listening: http://${formatHostForUrl(config.host)}:${config.port}`,
 		`Dashboard: ${config.dashboardUrl}`,
 	];
 
 	if (config.tokenSource === "generated") {
-		lines.push("Auth token: generated for this process only; it will not be persisted.");
-		lines.push(`Generated token: ${config.authToken}`);
-		lines.push("Use API header: x-alfred-auth: <generated token above>");
+		lines.push("Auth token: generated for this process; value is printed after startup succeeds and will not be persisted.");
 	} else {
 		lines.push("Auth token: using ALFRED_LOCAL_TOKEN from the environment; value is not printed.");
 		lines.push("Use API header: x-alfred-auth: <your ALFRED_LOCAL_TOKEN>");
 	}
 
-	lines.push("Shutdown: press Ctrl+C or send SIGTERM.");
+	lines.push("Shutdown: press Ctrl+C or send SIGTERM/SIGHUP.");
 	return `${lines.join("\n")}\n`;
 }
 
 export function formatDaemonStartedMessage(config: DaemonCliConfig, started: { host: string; port: number }): string {
-	return `Alfred daemon ready on http://${started.host}:${started.port}\nDashboard: ${config.dashboardUrl}\n`;
+	const lines = [
+		`Alfred daemon ready on http://${formatHostForUrl(started.host)}:${started.port}`,
+		`Dashboard: ${config.dashboardUrl}`,
+	];
+	if (config.tokenSource === "generated") {
+		lines.push(`Generated token: ${config.authToken}`);
+		lines.push("Use API header: x-alfred-auth: <generated token above>");
+	}
+	return `${lines.join("\n")}\n`;
 }
 
 export function formatDaemonStartupError(error: unknown, config?: DaemonCliConfig): string {
 	if (isNodeError(error) && error.code === "EADDRINUSE") {
-		const endpoint = config ? `${config.host}:${config.port}` : "configured address";
+		const endpoint = config ? `${formatHostForUrl(config.host)}:${config.port}` : "configured address";
 		return `Failed to start Alfred daemon: ${endpoint} is already in use. Set ALFRED_PORT to a free local port or stop the existing daemon.\n`;
 	}
 	if (error instanceof Error) {
@@ -106,6 +118,15 @@ export async function runDaemonCli(options: RunDaemonCliOptions = {}): Promise<n
 	return 0;
 }
 
+function parseAlfredHost(rawHost: string | undefined): string {
+	const value = normalizedEnvValue(rawHost) ?? DEFAULT_DAEMON_HOST;
+	const host = value === "[::1]" ? "::1" : value;
+	if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+		throw new Error(`Invalid ALFRED_HOST ${JSON.stringify(rawHost)}: expected a loopback host (127.0.0.1, localhost, or ::1).`);
+	}
+	return host;
+}
+
 function parseAlfredPort(rawPort: string | undefined): number {
 	const value = normalizedEnvValue(rawPort);
 	if (!value) return DEFAULT_DAEMON_PORT;
@@ -117,6 +138,10 @@ function parseAlfredPort(rawPort: string | undefined): number {
 		throw new Error(`Invalid ALFRED_PORT ${JSON.stringify(rawPort)}: expected an integer between 1 and 65535.`);
 	}
 	return port;
+}
+
+function formatHostForUrl(host: string): string {
+	return host.includes(":") ? `[${host.replace(/^\[/, "").replace(/\]$/, "")}]` : host;
 }
 
 function normalizedEnvValue(value: string | undefined): string | undefined {
@@ -131,7 +156,7 @@ function createLocalAuthToken(): string {
 async function waitForShutdown(
 	daemon: AlfredDaemon,
 	stdout: Pick<NodeJS.WriteStream, "write">,
-	processLike: NodeJS.Process,
+	processLike: DaemonSignalEmitter,
 ): Promise<void> {
 	await new Promise<void>((resolve) => {
 		let stopping = false;
@@ -150,11 +175,12 @@ async function waitForShutdown(
 		};
 		processLike.once("SIGINT", shutdown);
 		processLike.once("SIGTERM", shutdown);
+		processLike.once("SIGHUP", shutdown);
 	});
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-	return error instanceof Error && "code" in error;
+	return error instanceof Error && "code" in error && typeof error.code === "string";
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

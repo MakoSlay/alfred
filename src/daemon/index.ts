@@ -77,14 +77,19 @@ interface DraftIntent {
 export function defaultDaemonConfig(overrides: Partial<AlfredDaemonConfig> = {}): AlfredDaemonConfig {
 	const host = overrides.host ?? "127.0.0.1";
 	const port = overrides.port ?? 47_321;
+	const originHost = formatHostForUrl(host);
 	return {
 		host,
 		port,
 		authToken: overrides.authToken ?? process.env.ALFRED_LOCAL_TOKEN ?? randomBytes(24).toString("base64url"),
 		allowedHosts: overrides.allowedHosts ?? ["127.0.0.1", "localhost", "::1", "[::1]"],
-		allowedOrigins: overrides.allowedOrigins ?? [`http://${host}:${port}`, `http://localhost:${port}`, `http://127.0.0.1:${port}`],
+		allowedOrigins: overrides.allowedOrigins ?? [`http://${originHost}:${port}`, `http://localhost:${port}`, `http://127.0.0.1:${port}`],
 		maxBodyBytes: overrides.maxBodyBytes ?? 128 * 1024,
 	};
+}
+
+function formatHostForUrl(host: string): string {
+	return host.includes(":") ? `[${host.replace(/^\[/, "").replace(/\]$/, "")}]` : host;
 }
 
 export function createAlfredDaemon(

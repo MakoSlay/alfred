@@ -106,7 +106,7 @@ Listening: http://127.0.0.1:47321
 Dashboard: http://127.0.0.1:47321/dashboard
 Auth token: using ALFRED_LOCAL_TOKEN from the environment; value is not printed.
 Use API header: x-alfred-auth: <your ALFRED_LOCAL_TOKEN>
-Shutdown: press Ctrl+C or send SIGTERM.
+Shutdown: press Ctrl+C or send SIGTERM/SIGHUP.
 Alfred daemon ready on http://127.0.0.1:47321
 ```
 
@@ -137,7 +137,7 @@ Generated-token smoke:
 env -u ALFRED_LOCAL_TOKEN ALFRED_PORT=47323 npm run daemon
 ```
 
-Result: daemon generated a process-local token, printed the generated token once, used `x-alfred-auth: <generated token above>` for instructions, did not persist the token, and shut down cleanly on `SIGTERM`.
+Result: daemon generated a process-local token, printed the generated token once only after startup succeeded, used `x-alfred-auth: <generated token above>` for instructions, did not persist the token, and shut down cleanly on `SIGTERM`.
 
 Invalid-port smoke:
 
