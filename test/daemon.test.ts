@@ -4,6 +4,7 @@ import test from "node:test";
 import { createAlfredDaemon, defaultDaemonConfig } from "../src/daemon/index.ts";
 import { cliSource, piCommandSource, powerCodeTarget } from "../src/testing/fixtures.ts";
 import type { AlfredDraft, AlfredHandleRequest, AlfredTarget } from "../src/contracts/runtime.ts";
+import type { AlfredPlanner, AlfredPlannerInput } from "../src/planner/index.ts";
 import type { CmuxError } from "../src/cmux/index.ts";
 
 interface MockCmuxOptions {
@@ -39,11 +40,11 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 	};
 }
 
-async function withDaemon(run: (baseUrl: string, token: string, mock: ReturnType<typeof createMockCmux>) => Promise<void>): Promise<void> {
+async function withDaemon(run: (baseUrl: string, token: string, mock: ReturnType<typeof createMockCmux>) => Promise<void>, dependencies: { planner?: AlfredPlanner } = {}): Promise<void> {
 	const mock = createMockCmux();
 	const daemon = createAlfredDaemon(
 		{ host: "127.0.0.1", port: 0, authToken: "test-token", allowedOrigins: ["http://127.0.0.1"] },
-		{ cmux: mock.cmux, now: () => new Date("2026-06-19T22:00:00.000Z") },
+		{ cmux: mock.cmux, now: () => new Date("2026-06-19T22:00:00.000Z"), planner: dependencies.planner },
 	);
 	const started = await daemon.start();
 	try {
@@ -156,6 +157,130 @@ test("Powerco named target request creates a pending draft without sending", asy
 		assert.equal(stateBody.pendingDrafts.length, 1);
 		assert.equal(stateBody.pendingDrafts[0]?.id, body.pendingDraft?.id);
 	});
+});
+
+test("planner draft_message by target ref creates a pending draft without sending", async () => {
+	let capturedInput: AlfredPlannerInput | undefined;
+	const planner: AlfredPlanner = {
+		async plan(input) {
+			capturedInput = input;
+			return {
+				ok: true,
+				intent: { kind: "draft_message", targetRef: "surface:42", message: "Please tell me what files I can delete now." },
+				sanitizedInputSummary: { value: input.inputText, redaction: { status: "not_needed" } },
+			};
+		},
+	};
+	await withDaemon(async (baseUrl, token, mock) => {
+		const response = await postJson<{ ok: boolean; pendingDraft?: AlfredDraft; proposedActions: Array<{ kind: string; status: string }> }>(baseUrl, token, "/handle", {
+			requestId: "req_planner_ref",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "can you get the powerco tab to identify removable files?" },
+			context: { currentWorkspaceRef: "workspace:9" },
+			policy: { requireConfirmationForSend: true, maxTranscriptChars: 120 },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.equal(response.body.pendingDraft?.target.ref, "surface:42");
+		assert.equal(response.body.pendingDraft?.text.value, "Please tell me what files I can delete now.");
+		assert.equal(response.body.proposedActions[0]?.kind, "draft");
+		assert.equal(response.body.proposedActions[0]?.status, "pending_confirmation");
+		assert.deepEqual(mock.sends, []);
+		assert.equal(capturedInput?.inputText, "can you get the powerco tab to identify removable files?");
+		assert.equal(capturedInput?.maxInputChars, 120);
+		assert.equal(capturedInput?.visibleTargets[0]?.metadata, undefined);
+	}, { planner });
+});
+
+test("planner draft_message by target name resolves safely", async () => {
+	const planner: AlfredPlanner = {
+		async plan(input) {
+			return {
+				ok: true,
+				intent: { kind: "draft_message", targetName: "Codex Review", message: "Please review the latest patch." },
+				sanitizedInputSummary: { value: input.inputText, redaction: { status: "not_needed" } },
+			};
+		},
+	};
+	await withDaemon(async (baseUrl, token, mock) => {
+		const response = await postJson<{ ok: boolean; pendingDraft?: AlfredDraft }>(baseUrl, token, "/handle", {
+			requestId: "req_planner_name",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "please ask the review session to look at the patch" },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.equal(response.body.pendingDraft?.target.label, "Codex Review");
+		assert.equal(response.body.pendingDraft?.status, "pending");
+		assert.deepEqual(mock.sends, []);
+	}, { planner });
+});
+
+test("planner unsupported direct-send output is ignored without persisting raw provider text", async () => {
+	const rawProviderSecret = "sk-rawprovidersecret123456789";
+	const planner: AlfredPlanner = {
+		async plan(input) {
+			return {
+				ok: false,
+				errors: [{ code: "unsupported_action", message: `provider said ${rawProviderSecret}`, retryable: false }],
+				sanitizedInputSummary: { value: input.inputText, redaction: { status: "not_needed" } },
+			};
+		},
+	};
+	await withDaemon(async (baseUrl, token, mock) => {
+		const response = await postJson<{ ok: boolean; pendingDraft?: AlfredDraft; errors?: Array<{ code: string; message: string }>; events: Array<{ kind: string }> }>(baseUrl, token, "/handle", {
+			requestId: "req_planner_unsupported",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "make the other chat do this" },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.equal(response.body.pendingDraft, undefined);
+		assert.equal(response.body.errors?.[0]?.code, "unsupported_action");
+		assert.equal(response.body.errors?.[0]?.message.includes(rawProviderSecret), false);
+		assert.equal(response.body.events.some((event) => event.kind === "error.raised"), true);
+		assert.deepEqual(mock.sends, []);
+
+		const state = await fetch(`${baseUrl}/state`, { headers: authHeaders(token) });
+		const stateText = await state.text();
+		assert.equal(stateText.includes(rawProviderSecret), false);
+	}, { planner });
+});
+
+test("planner target ambiguity fails closed without creating a draft", async () => {
+	const planner: AlfredPlanner = {
+		async plan(input) {
+			return {
+				ok: true,
+				intent: { kind: "draft_message", targetName: "Power Code", message: "Please continue." },
+				sanitizedInputSummary: { value: input.inputText, redaction: { status: "not_needed" } },
+			};
+		},
+	};
+	await withDaemon(async (baseUrl, token, mock) => {
+		mock.setTargets([
+			powerCodeTarget({ ref: "surface:42", surfaceRef: "surface:42", label: "Power Code" }),
+			powerCodeTarget({ ref: "surface:43", surfaceRef: "surface:43", label: "Power Code" }),
+		]);
+		const response = await postJson<{ ok: boolean; pendingDraft?: AlfredDraft; errors?: Array<{ code: string }> }>(baseUrl, token, "/handle", {
+			requestId: "req_planner_ambiguous",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "get power code to continue" },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.equal(response.body.pendingDraft, undefined);
+		assert.equal(response.body.errors?.[0]?.code, "target_ambiguous");
+		assert.deepEqual(mock.sends, []);
+	}, { planner });
 });
 
 test("POST /confirm sends a pending draft exactly once", async () => {

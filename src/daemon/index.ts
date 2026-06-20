@@ -5,6 +5,7 @@ import type {
 	AlfredAction,
 	AlfredCapability,
 	AlfredDraft,
+	AlfredError,
 	AlfredEvent,
 	AlfredHandleRequest,
 	AlfredHandleResponse,
@@ -19,6 +20,7 @@ import type {
 import { DEFAULT_DRAFT_TTL_MS, redactedText, sourceHasCapabilities } from "../contracts/runtime.ts";
 import { createCmuxWorldModelAdapter, type CmuxResult, type CmuxWorldModelAdapter } from "../cmux/index.ts";
 import { formatHostForUrl } from "../lib/host-formatting.ts";
+import { buildPlannerInput, plannerInputSummary, validatePlannerResult, type AlfredPlanner, type AlfredPlannerIntent, type AlfredPlannerResult } from "../planner/index.ts";
 
 export interface AlfredDaemonConfig {
 	readonly host: string;
@@ -42,6 +44,7 @@ type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "sendTextToS
 export interface AlfredDaemonDependencies {
 	cmux?: AlfredDaemonCmux;
 	now?: () => Date;
+	planner?: AlfredPlanner;
 }
 
 export interface AlfredDaemon {
@@ -75,6 +78,12 @@ interface DraftIntent {
 	confidence: AlfredTarget["confidence"];
 }
 
+interface PlannerDraftResolution {
+	ok: boolean;
+	intent?: DraftIntent;
+	error?: AlfredError;
+}
+
 export function defaultDaemonConfig(overrides: Partial<AlfredDaemonConfig> = {}): AlfredDaemonConfig {
 	const host = overrides.host ?? "127.0.0.1";
 	const port = overrides.port ?? 47_321;
@@ -97,8 +106,9 @@ export function createAlfredDaemon(
 	const state: DaemonState = { recentTargets: [], events: [], pendingDrafts: [] };
 	const cmux = dependencies.cmux ?? createCmuxWorldModelAdapter();
 	const now = dependencies.now ?? (() => new Date());
+	const planner = dependencies.planner;
 	const server = http.createServer((request, response) => {
-		void handleDaemonRequest(request, response, resolvedConfig, state, cmux, now);
+		void handleDaemonRequest(request, response, resolvedConfig, state, cmux, now, planner);
 	});
 
 	return {
@@ -145,6 +155,7 @@ async function handleDaemonRequest(
 	state: DaemonState,
 	cmux: AlfredDaemonCmux,
 	now: () => Date,
+	planner?: AlfredPlanner,
 ): Promise<void> {
 	const url = new URL(request.url ?? "/", `http://${request.headers.host ?? config.host}`);
 	const authOptionalRoute = request.method === "GET" && (url.pathname === "/health" || url.pathname === "/" || url.pathname === "/dashboard");
@@ -195,7 +206,7 @@ async function handleDaemonRequest(
 			writeJson(response, 400, { ok: false, error: { code: "invalid_request", message: body.error, retryable: false } });
 			return;
 		}
-		const result = await handleRequest(body.value, state, cmux, now);
+		const result = await handleRequest(body.value, state, cmux, now, planner);
 		writeJson(response, result.ok ? 200 : 400, result);
 		return;
 	}
@@ -242,6 +253,7 @@ async function handleRequest(
 	state: DaemonState,
 	cmux: AlfredDaemonCmux,
 	now: () => Date,
+	planner?: AlfredPlanner,
 ): Promise<AlfredHandleResponse> {
 	const inputText = request.input?.text?.trim() ?? "";
 	if (!inputText) {
@@ -267,24 +279,76 @@ async function handleRequest(
 	if (draftIntent) {
 		return createDraftResponse(request, effectiveSource, draftIntent, state, now);
 	}
+	if (planner) {
+		const plannerInput = buildPlannerInput(request, effectiveSource, targets.value);
+		let plannerResult: AlfredPlannerResult;
+		try {
+			plannerResult = validatePlannerResult(await planner.plan(plannerInput), plannerInputSummary(plannerInput.inputText, plannerInput.maxInputChars));
+		} catch {
+			plannerResult = validatePlannerResult({ ok: false, errors: [{ code: "llm_unavailable", message: "Planner failed before returning a validated action.", retryable: true }] }, plannerInputSummary(plannerInput.inputText, plannerInput.maxInputChars));
+		}
+		if (plannerResult.ok && plannerResult.intent?.kind === "draft_message") {
+			const resolved = resolvePlannerDraftIntent(plannerResult.intent, targets.value, request.context?.currentWorkspaceRef);
+			if (resolved.ok && resolved.intent) {
+				return createDraftResponse(request, effectiveSource, resolved.intent, state, now);
+			}
+			return createNoActionResponse(request, effectiveSource, state, now, {
+				errors: resolved.error ? [resolved.error] : [{ code: "target_not_found", message: "Planner draft target could not be resolved.", retryable: false }],
+				plannerSummary: plannerResult.sanitizedInputSummary,
+			});
+		}
+		if (!plannerResult.ok) {
+			return createNoActionResponse(request, effectiveSource, state, now, { errors: plannerResult.errors, plannerSummary: plannerResult.sanitizedInputSummary });
+		}
+	}
+	return createNoActionResponse(request, effectiveSource, state, now);
+}
+
+function createNoActionResponse(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	state: DaemonState,
+	now: () => Date,
+	options: { errors?: AlfredError[]; plannerSummary?: RedactedText } = {},
+): AlfredHandleResponse {
 	const createdAt = now().toISOString();
+	const events: AlfredEvent[] = [];
+	const sanitizedErrors = options.errors?.slice(0, 5);
+	if (sanitizedErrors && sanitizedErrors.length > 0) {
+		events.push(pushEvent(state, {
+			id: nextId("evt"),
+			kind: "error.raised",
+			createdAt,
+			requestId: request.requestId,
+			source: { kind: source.kind, id: source.id, label: source.label },
+			summary: `Planner proposal ignored: ${sanitizedErrors[0]?.code ?? "unsupported_action"}.`,
+			data: {
+				codes: sanitizedErrors.map((error) => error.code),
+				plannerInput: options.plannerSummary?.value,
+			},
+			redaction: options.plannerSummary?.redaction ?? { status: "unknown" },
+			retention: defaultEventRetention(createdAt),
+		}));
+	}
 	const event = pushEvent(state, {
 		id: nextId("evt"),
 		kind: "request.received",
 		createdAt,
 		requestId: request.requestId,
-		source: { kind: request.source.kind, id: request.source.id, label: request.source.label },
-		summary: `Handled ${request.source.kind} request without executing privileged actions.`,
+		source: { kind: source.kind, id: source.id, label: source.label },
+		summary: `Handled ${source.kind} request without executing privileged actions.`,
 		redaction: { status: "not_needed" },
 		retention: defaultEventRetention(createdAt),
 	});
+	events.push(event);
 	return {
 		requestId: request.requestId,
 		createdAt,
 		ok: true,
 		displayText: "Alfred daemon received the request. No privileged action was needed.",
 		proposedActions: [],
-		events: [event],
+		events,
+		errors: sanitizedErrors,
 		nextStatePatch: request.context?.visibleTargets?.[0] ? { rememberTarget: request.context.visibleTargets[0] } : undefined,
 	};
 }
@@ -522,6 +586,56 @@ function cancelDraft(request: AlfredCancelRequest, state: DaemonState, now: () =
 		events: [event],
 		nextStatePatch: { rememberDraftId: null },
 	};
+}
+
+function resolvePlannerDraftIntent(intent: Extract<AlfredPlannerIntent, { kind: "draft_message" }>, targets: AlfredTarget[], currentWorkspaceRef?: AlfredRef): PlannerDraftResolution {
+	const refMatches = intent.targetRef ? targetRefMatches(targets, intent.targetRef) : [];
+	if (intent.targetRef && refMatches.length !== 1) {
+		return {
+			ok: false,
+			error: {
+				code: refMatches.length > 1 ? "target_ambiguous" : "target_not_found",
+				message: refMatches.length > 1 ? "Planner targetRef matched multiple visible targets." : "Planner targetRef did not match a visible target.",
+				retryable: false,
+			},
+		};
+	}
+	if (intent.targetName) {
+		const namedMatches = bestTargetMatches(currentWorkspaceRef ? prioritizeCurrentWorkspace(targets, currentWorkspaceRef) : targets, normalizeForMatch(intent.targetName));
+		if (!intent.targetRef) {
+			if (namedMatches.length !== 1) {
+				return {
+					ok: false,
+					error: {
+						code: namedMatches.length > 1 ? "target_ambiguous" : "target_not_found",
+						message: namedMatches.length > 1 ? "Planner targetName matched multiple visible targets." : "Planner targetName did not match a visible target.",
+						retryable: false,
+					},
+				};
+			}
+			const target = namedMatches[0]!;
+			return { ok: true, intent: { target, message: intent.message, confidence: target.confidence ?? "unknown" } };
+		}
+		if (namedMatches.length === 1 && refMatches[0] && !sameTarget(namedMatches[0]!, refMatches[0])) {
+			return {
+				ok: false,
+				error: { code: "target_ambiguous", message: "Planner targetRef and targetName identified different visible targets.", retryable: false },
+			};
+		}
+	}
+	const target = refMatches[0];
+	if (!target) {
+		return { ok: false, error: { code: "target_not_found", message: "Planner draft target could not be resolved.", retryable: false } };
+	}
+	return { ok: true, intent: { target, message: intent.message, confidence: target.confidence ?? "exact" } };
+}
+
+function targetRefMatches(targets: AlfredTarget[], targetRef: AlfredRef): AlfredTarget[] {
+	return targets.filter((target) => requiredSendCapabilities(target).length > 0 && (target.ref === targetRef || target.surfaceRef === targetRef || target.workspaceRef === targetRef));
+}
+
+function sameTarget(left: AlfredTarget, right: AlfredTarget): boolean {
+	return left.ref === right.ref || (left.surfaceRef !== undefined && left.surfaceRef === right.surfaceRef);
 }
 
 function resolveDraftIntent(inputText: string, targets: AlfredTarget[], currentWorkspaceRef?: AlfredRef): DraftIntent | null {
