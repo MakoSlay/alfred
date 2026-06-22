@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createAlfredDaemon, defaultDaemonConfig } from "../src/daemon/index.ts";
+import { renderDashboardHtml } from "../src/dashboard/index.ts";
 import { cliSource, piCommandSource, powerCodeTarget } from "../src/testing/fixtures.ts";
 import type { AlfredDraft, AlfredHandleRequest, AlfredTarget } from "../src/contracts/runtime.ts";
 import type { AlfredPlanner, AlfredPlannerInput } from "../src/planner/index.ts";
@@ -772,18 +773,44 @@ test("default daemon origins include unique loopback origins", () => {
 	assert.deepEqual(ipv6Config.allowedOrigins, ["http://[::1]:47322", "http://localhost:47322", "http://127.0.0.1:47322"]);
 });
 
+test("dashboard renderer includes local operator UI without query-token patterns", () => {
+	const html = renderDashboardHtml();
+	assert.match(html, /Alfred Local Dashboard/);
+	assert.match(html, /Local authentication/);
+	assert.match(html, /daemon token printed in the terminal/i);
+	assert.match(html, /Daemon health/);
+	assert.match(html, /Active loop/);
+	assert.match(html, /Pending drafts/);
+	assert.match(html, /Visible surfaces and workspaces/);
+	assert.match(html, /Recent activity/);
+	assert.match(html, /Storage warnings/);
+	assert.match(html, /localStorage/);
+	assert.match(html, /x-alfred-auth/);
+	assert.match(html, /api\('\/confirm'/);
+	assert.match(html, /api\('\/cancel'/);
+	assert.equal(html.includes("test-token"), false);
+	assert.equal(html.includes("URLSearchParams"), false);
+	assert.equal(html.includes("location.search"), false);
+	assert.equal(html.includes("innerHTML"), false);
+});
+
 test("dashboard route renders local UI without exposing daemon state", async () => {
 	await withDaemon(async (baseUrl, token) => {
 		const dashboard = await fetch(`${baseUrl}/dashboard`);
 		assert.equal(dashboard.status, 200);
 		assert.equal(dashboard.headers.get("content-type")?.includes("text/html"), true);
+		assert.equal(dashboard.headers.get("cache-control"), "no-store");
+		assert.equal(dashboard.headers.get("x-content-type-options"), "nosniff");
+		assert.match(dashboard.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+		assert.match(dashboard.headers.get("content-security-policy") ?? "", /connect-src 'self'/);
 		assert.equal(dashboard.headers.has("access-control-allow-origin"), false);
 		const html = await dashboard.text();
 		assert.match(html, /Alfred Local Dashboard/);
-		assert.match(html, /GET \/surfaces|\/surfaces/);
+		assert.match(html, /\/state/);
+		assert.match(html, /\/surfaces/);
 		assert.match(html, /pending drafts/i);
-		assert.match(html, /confirm/i);
-		assert.match(html, /cancel/i);
+		assert.match(html, /Confirm send/);
+		assert.match(html, /Cancel draft/);
 		assert.match(html, /x-alfred-auth/);
 		assert.equal(html.includes(token), false);
 		assert.equal(html.includes("URLSearchParams"), false);
