@@ -82,7 +82,7 @@ If the new project initially lacks one of those scripts, add the missing script 
 - [x] 010 - Daemon-owned loop manager foundation ([010-daemon-owned-loop-manager.md](010-daemon-owned-loop-manager.md); depends on: 008, 009)
 - [x] 011 - Local persistence and retention ([011-local-persistence-and-retention.md](011-local-persistence-and-retention.md); depends on: 008)
 - [x] 012 - Dashboard polish and auth UX ([012-dashboard-polish-and-auth-ux.md](012-dashboard-polish-and-auth-ux.md); depends on: 008)
-- [ ] 013 - Pi loop bridge migration ([013-pi-loop-bridge-migration.md](013-pi-loop-bridge-migration.md); depends on: 010)
+- [x] 013 - Pi loop bridge migration ([013-pi-loop-bridge-migration.md](013-pi-loop-bridge-migration.md); depends on: 010)
 
 ## External Reference Notes
 
@@ -123,17 +123,17 @@ Do not expand scope just because these projects have broader features. Use them 
 - [x] Live daemon + Pi bridge smoke is documented — Task 008 recorded curl smoke; optional opt-in Pi bridge procedure remains documented and not default.
 - [x] Daemon-owned planning parity is started — Task 009 added a source-agnostic planner seam, sanitized planner input, strict action validation, and draft-confirm-only send proposals.
 - [x] Daemon-owned loop foundation is started — Task 010 added daemon loop contracts, one-active-loop lifecycle state, loop control APIs, scheduler/decision seams, and draft-confirm/autonomous-send capability rules.
-- [ ] Pi loop bridge migration is planned separately — Task 013 should move Pi loop controls to daemon mode only after Task 010 exists.
+- [x] Pi loop bridge migration is complete — Task 013 routes Pi loop start/status/stop through daemon loop APIs only when the opt-in daemon bridge is enabled and keeps Pi-local fallback as the default rollback path.
 - [x] Local persistence decision is explicit — Task 011 defines app-dir JSONL storage, target memory, retention/redaction, and reset behavior before durable data is stored.
 - [x] Dashboard polish is complete — Task 012 extracted dashboard rendering, clarified manual token/localStorage UX, preserved route/API security, and displays health, storage warnings, active loop state, pending drafts, targets, and recent events.
 
 ## Completion
 
 - [x] Foundation milestone is complete: tasks 000-007 are checked and the promise `ALL 8 ALFRED-LOCAL TASKS COMPLETE` has been reached.
-- [ ] Daemon-expansion milestone is complete: tasks 009-013 are checked and `ALL 5 ALFRED-DAEMON-EXPANSION TASKS COMPLETE` is true.
+- [x] Daemon-expansion milestone is complete: tasks 009-013 are checked and `ALL 5 ALFRED-DAEMON-EXPANSION TASKS COMPLETE` is true.
 - [x] Standalone Alfred gates pass for each standalone task that changes code.
-- [ ] Pi extension gates pass for each task that changes `/Users/muhammadabdul/work/pi-smart-voice-notify`.
-- [ ] Live smoke findings are recorded for daemon CLI, dashboard, and opt-in Pi bridge paths.
+- [x] Pi extension gates pass for each task that changes `/Users/muhammadabdul/work/pi-smart-voice-notify`.
+- [x] Live smoke findings are recorded for daemon CLI, dashboard, and opt-in Pi bridge paths.
 
 ## Fresh-Eyes Review Checklist
 

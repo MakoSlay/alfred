@@ -31,13 +31,13 @@ Move the Pi bridge/control path for delegation loops after the daemon loop manag
 
 ## Checklist
 
-- [ ] Read current Pi loop paths in `/Users/muhammadabdul/work/pi-smart-voice-notify/src/index.ts` and identify the minimum bridge handoff points.
-- [ ] Add thin daemon-client methods for loop start, stop, and status using existing daemon bridge config and auth behavior.
-- [ ] Route Pi loop commands to daemon only when daemon bridge mode is explicitly enabled and the daemon reports loop support.
-- [ ] Preserve Pi-local loop behavior for bridge-disabled, daemon-unavailable, timeout, unsupported-response, and auth-failure cases.
-- [ ] Ensure Pi does not claim loop actions succeeded until the daemon response confirms the accepted state transition.
-- [ ] Add Pi extension tests for enabled success, disabled local fallback, daemon-unavailable fallback, unsupported loop endpoint fallback, and stop behavior.
-- [ ] Document live smoke and rollback steps.
+- [x] Read current Pi loop paths in `/Users/muhammadabdul/work/pi-smart-voice-notify/src/index.ts` and identify the minimum bridge handoff points.
+- [x] Add thin daemon-client methods for loop start, stop, and status using existing daemon bridge config and auth behavior.
+- [x] Route Pi loop commands to daemon only when daemon bridge mode is explicitly enabled and the daemon reports loop support.
+- [x] Preserve Pi-local loop behavior for bridge-disabled, daemon-unavailable, timeout, unsupported-response, and auth-failure cases.
+- [x] Ensure Pi does not claim loop actions succeeded until the daemon response confirms the accepted state transition.
+- [x] Add Pi extension tests for enabled success, disabled local fallback, daemon-unavailable fallback, unsupported loop endpoint fallback, and stop behavior.
+- [x] Document live smoke and rollback steps.
 
 ## Tests
 
@@ -78,18 +78,34 @@ Then disable daemon mode and verify Pi-local fallback still works.
 
 ## Completion Criteria
 
-- [ ] Pi loop commands use daemon loop APIs only when daemon bridge mode is explicitly enabled and supported.
-- [ ] Pi-local loop behavior remains the default and remains tested.
-- [ ] Daemon failure or unsupported loop response does not break `/alfred`.
-- [ ] Pi does not claim daemon loop state transitions until the daemon confirms them.
-- [ ] Live smoke and rollback findings are recorded.
-- [ ] Relevant gates pass in both repos if both are touched.
+- [x] Pi loop commands use daemon loop APIs only when daemon bridge mode is explicitly enabled and supported.
+- [x] Pi-local loop behavior remains the default and remains tested.
+- [x] Daemon failure or unsupported loop response does not break `/alfred`.
+- [x] Pi does not claim daemon loop state transitions until the daemon confirms them.
+- [x] Live smoke and rollback findings are recorded.
+- [x] Relevant gates pass in both repos if both are touched.
 
 ## Notes
 
 - This task exists because task 010 was intentionally narrowed to daemon loop foundation work.
 - Keep Pi bridge code thin. Product policy should live in Alfred daemon/core, not in the Pi extension.
 - The manual smoke phrase that asks Alfred to find and manage a named session is most informative after both Task 009 (planner) and Task 010 (loop manager) are complete. Task 013 only hard-depends on Task 010 because bridge routing can still preserve fallback without planner parity.
+
+## Implementation Notes
+
+- Added Pi daemon-client loop helpers for `/loops/start`, `/loops/status`, `/loops/stop`, and `/loops/poll` using the existing opt-in daemon bridge config and `x-alfred-auth` token behavior.
+- General `/handle` bridge calls keep draft-confirm-only capabilities; loop bridge calls use explicit loop capabilities, including `loop.autonomousSend`, so the daemon approval model remains capability-scoped.
+- Pi direct loop commands and LLM-produced `delegate_loop` actions now try daemon loop start first only when daemon bridge mode is enabled and no Pi-local loop is already active. Disabled, unavailable, timeout, unsupported, and auth-failure cases fall back to the existing Pi-local loop implementation.
+- Loop status/stop commands route to daemon only in daemon mode when Pi does not already own a local active loop. Semantic daemon failures are reported instead of silently claiming success; transport/unsupported/auth failures fall back to local behavior.
+- Rollback remains disabling `ALFRED_DAEMON_ENABLED` / `PI_SMART_NOTIFY_ALFRED_DAEMON_ENABLED`; the Pi-local `activeDelegationLoop`, scheduler, and stop logic remain intact.
+
+## Validation Evidence
+
+- 2026-06-22: `/Users/muhammadabdul/work/pi-smart-voice-notify` `npm run check` — passed.
+- 2026-06-22: `/Users/muhammadabdul/work/pi-smart-voice-notify` `npm run typecheck` — passed.
+- 2026-06-22: `/Users/muhammadabdul/work/pi-smart-voice-notify` `npm test` — passed (71 tests).
+- 2026-06-22: Cross-repo loop bridge smoke with a programmatic Alfred daemon and mock cmux target — `callAlfredDaemonLoopStart`, `callAlfredDaemonLoopStatus`, and `callAlfredDaemonLoopStop` all returned handled success.
+- 2026-06-22: Live CLI daemon smoke on `ALFRED_PORT=47324` confirmed loop bridge auth/transport behavior, but full real-cmux loop start was blocked by local cmux returning `Failed to write to socket (Broken pipe, errno 32)` for `cmux workspace list --json --id-format both`. This is an environment/cmux availability issue, not a bridge-contract failure; rollback is leaving daemon bridge flags disabled.
 
 ## Blockers
 
