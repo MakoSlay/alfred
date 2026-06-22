@@ -67,14 +67,14 @@ Autonomous-send approval model for the first pass:
 
 ## Checklist
 
-- [ ] Read Pi loop ownership code in `src/index.ts` (`startDelegationLoop`, `scheduleDelegationLoopPoll`, `stopDelegationLoop`) and identify daemon-portable concepts.
-- [ ] Define loop contracts for start/stop/status, target refs, poll cadence, stop conditions, and allowed capabilities.
-- [ ] Add daemon loop manager module with explicit lifecycle state and no hidden global sends.
-- [ ] Expose minimal daemon API/control path for loop start/stop/status for future clients and dashboard visibility.
-- [ ] Implement the concrete `loop.autonomousSend` approval capability before any loop send can bypass draft confirmation.
-- [ ] Ensure loop sends use draft-confirm unless the explicit loop-send approval model is present and tested.
-- [ ] Add tests for start, poll scheduling seam, stop, target disappearance, send failure, capability denial, and missing autonomous-send approval.
-- [ ] Document the Pi bridge migration outline and rollback requirements for task 013 without modifying Pi behavior here.
+- [x] Read Pi loop ownership code in `src/index.ts` (`startDelegationLoop`, `scheduleDelegationLoopPoll`, `stopDelegationLoop`) and identify daemon-portable concepts.
+- [x] Define loop contracts for start/stop/status, target refs, poll cadence, stop conditions, and allowed capabilities.
+- [x] Add daemon loop manager module with explicit lifecycle state and no hidden global sends.
+- [x] Expose minimal daemon API/control path for loop start/stop/status for future clients and dashboard visibility.
+- [x] Implement the concrete `loop.autonomousSend` approval capability before any loop send can bypass draft confirmation.
+- [x] Ensure loop sends use draft-confirm unless the explicit loop-send approval model is present and tested.
+- [x] Add tests for start, poll scheduling seam, stop, target disappearance, send failure, capability denial, and missing autonomous-send approval.
+- [x] Document the Pi bridge migration outline and rollback requirements for task 013 without modifying Pi behavior here.
 
 ## Tests
 
@@ -103,18 +103,41 @@ Manual smoke after daemon loop support exists:
 
 ## Completion Criteria
 
-- [ ] Daemon owns loop lifecycle state and emits loop lifecycle events.
-- [ ] Loop sends/observations are capability-scoped and fail closed.
-- [ ] Any autonomous loop send requires a concrete approval capability/model; otherwise it must require draft confirmation.
-- [ ] Loops can be stopped reliably from daemon API.
-- [ ] Pi behavior is unchanged by this task.
-- [ ] Standalone Alfred gates pass.
+- [x] Daemon owns loop lifecycle state and emits loop lifecycle events.
+- [x] Loop sends/observations are capability-scoped and fail closed.
+- [x] Any autonomous loop send requires a concrete approval capability/model; otherwise it must require draft confirmation.
+- [x] Loops can be stopped reliably from daemon API.
+- [x] Pi behavior is unchanged by this task.
+- [x] Standalone Alfred gates pass.
 
 ## Notes
 
 - This task should not pretend loop extraction is complete; task 013 covers making Pi a loop client in daemon mode.
 - Prefer explicit timer seams in tests so loop behavior does not depend on wall-clock sleeps.
 - Loop planning may use Task 009's planner, but loop lifecycle/state must remain testable without a live provider.
+
+## Implementation Notes
+
+- Added `src/loops/index.ts` with daemon-owned loop contracts, one-active-loop lifecycle state, target resolution, observation capability checks, a decision seam, and an explicit scheduler seam.
+- Added daemon loop control routes: `POST /loops/start`, `POST /loops/poll`, `POST /loops/stop`, and `GET /loops/status`. `/state` now reports `activeLoop` from the daemon loop manager.
+- Loop start/status/stop emit lifecycle responses/events and keep state daemon-owned. The first-pass manager observes visible cmux targets through `readSurface` and does not read raw Pi session files or transcripts by default.
+- Loop `draft_reply` decisions create pending drafts unless the original loop source has the distinct `loop.autonomousSend` capability. `loop.manage` alone can start/stop/status/poll but does not permit direct sends.
+- Autonomous loop replies require both the target send capability (`surface.send` or `workspace.send`) and `loop.autonomousSend`; send failures return `send_failed` and do not claim success.
+- Pi extension behavior was not changed in this task.
+
+## Task 013 Pi Bridge Migration Outline
+
+- Keep the Pi bridge opt-in behind the existing daemon bridge flags; default Pi-local loop behavior must remain the rollback path.
+- In daemon mode, Pi should translate current loop intents (`delegate_loop`, loop status, stop loop) into daemon `/loops/*` calls rather than owning `activeDelegationLoop` locally.
+- If daemon `/loops/start`, `/loops/poll`, `/loops/status`, or `/loops/stop` is unavailable, unauthorized, or returns unsupported/failed responses, Pi should fall back to its existing local loop path and report the fallback reason.
+- Pi should not pass raw session files to the daemon in the first migration. The daemon loop foundation observes cmux surfaces only; any session-file observation requires a separately documented privacy/retention change.
+- Rollback is disabling the daemon bridge flags; the Pi-local `startDelegationLoop`, `scheduleDelegationLoopPoll`, and `stopDelegationLoop` functions remain intact until task 013 proves parity.
+
+## Validation Evidence
+
+- 2026-06-22: `npm run check` — passed (49 tests).
+- 2026-06-22: `npm run typecheck` — passed.
+- 2026-06-22: `npm test` — passed (49 tests).
 
 ## Blockers
 

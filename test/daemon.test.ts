@@ -5,6 +5,7 @@ import { createAlfredDaemon, defaultDaemonConfig } from "../src/daemon/index.ts"
 import { cliSource, piCommandSource, powerCodeTarget } from "../src/testing/fixtures.ts";
 import type { AlfredDraft, AlfredHandleRequest, AlfredTarget } from "../src/contracts/runtime.ts";
 import type { AlfredPlanner, AlfredPlannerInput } from "../src/planner/index.ts";
+import type { AlfredLoopDecision, AlfredLoopRuntimeState, AlfredLoopScheduler } from "../src/loops/index.ts";
 import type { CmuxError } from "../src/cmux/index.ts";
 
 interface MockCmuxOptions {
@@ -28,6 +29,9 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 			async listTargets() {
 				return { ok: true as const, value: targets };
 			},
+			async readSurface(surfaceRef: string) {
+				return { ok: true as const, value: { text: `screen for ${surfaceRef}` } };
+			},
 			async sendTextToSurface(surfaceRef: string, text: string) {
 				sends.push({ kind: "surface" as const, ref: surfaceRef, text });
 				return options.sendError ? { ok: false as const, error: options.sendError } : { ok: true as const, value: { surfaceRef } };
@@ -40,11 +44,14 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 	};
 }
 
-async function withDaemon(run: (baseUrl: string, token: string, mock: ReturnType<typeof createMockCmux>) => Promise<void>, dependencies: { planner?: AlfredPlanner } = {}): Promise<void> {
+async function withDaemon(
+	run: (baseUrl: string, token: string, mock: ReturnType<typeof createMockCmux>) => Promise<void>,
+	dependencies: { planner?: AlfredPlanner; loopDecider?: (loop: AlfredLoopRuntimeState, transcript: string) => Promise<AlfredLoopDecision>; loopScheduler?: AlfredLoopScheduler } = {},
+): Promise<void> {
 	const mock = createMockCmux();
 	const daemon = createAlfredDaemon(
 		{ host: "127.0.0.1", port: 0, authToken: "test-token", allowedOrigins: ["http://127.0.0.1"] },
-		{ cmux: mock.cmux, now: () => new Date("2026-06-19T22:00:00.000Z"), planner: dependencies.planner },
+		{ cmux: mock.cmux, now: () => new Date("2026-06-19T22:00:00.000Z"), planner: dependencies.planner, loopDecider: dependencies.loopDecider, loopScheduler: dependencies.loopScheduler },
 	);
 	const started = await daemon.start();
 	try {
@@ -329,6 +336,194 @@ test("send that through /handle confirms the latest pending draft", async () => 
 	});
 });
 
+test("loop API starts, reports, and stops one active loop", async () => {
+	const scheduled: Array<{ loopId: string; delayMs: number }> = [];
+	const cancelled: string[] = [];
+	await withDaemon(async (baseUrl, token) => {
+		const source = piCommandSource();
+		const started = await postJson<{ ok: boolean; activeLoop?: { id: string; target: { ref: string }; status: string }; events: Array<{ kind: string }> }>(baseUrl, token, "/loops/start", {
+			requestId: "req_loop_start",
+			source,
+			targetRef: "surface:42",
+			goal: { value: "Work until the file cleanup question is answered.", redaction: { status: "not_needed" } },
+			maxTurns: 4,
+			pollIntervalMs: 2_500,
+			allowedCapabilities: source.capabilities,
+		});
+
+		assert.equal(started.status, 200);
+		assert.equal(started.body.ok, true);
+		assert.equal(started.body.activeLoop?.target.ref, "surface:42");
+		assert.equal(started.body.events[0]?.kind, "loop.started");
+		assert.equal(scheduled[0]?.delayMs, 2_500);
+
+		const status = await fetch(`${baseUrl}/loops/status`, { headers: authHeaders(token) });
+		const statusBody = await status.json() as { activeLoop?: { id: string; status: string } };
+		assert.equal(statusBody.activeLoop?.id, started.body.activeLoop?.id);
+		assert.equal(statusBody.activeLoop?.status, "running");
+
+		const stopped = await postJson<{ ok: boolean; activeLoop?: { status: string }; events: Array<{ kind: string }> }>(baseUrl, token, "/loops/stop", {
+			requestId: "req_loop_stop",
+			loopId: started.body.activeLoop?.id,
+			source,
+			interruptTarget: true,
+		});
+		assert.equal(stopped.status, 200);
+		assert.equal(stopped.body.ok, true);
+		assert.equal(stopped.body.events[0]?.kind, "loop.stopped");
+		assert.equal(cancelled.includes(started.body.activeLoop?.id ?? ""), true);
+
+		const state = await fetch(`${baseUrl}/state`, { headers: authHeaders(token) });
+		const stateBody = await state.json() as { activeLoop: unknown; events: Array<{ kind: string }> };
+		assert.equal(stateBody.activeLoop, null);
+		assert.equal(stateBody.events.some((event) => event.kind === "loop.started"), true);
+		assert.equal(stateBody.events.some((event) => event.kind === "loop.stopped"), true);
+	}, {
+		loopScheduler: {
+			schedule(loopId, delayMs) { scheduled.push({ loopId, delayMs }); },
+			cancel(loopId) { cancelled.push(loopId); },
+		},
+	});
+});
+
+test("loop poll drafts replies when autonomous-send approval is absent", async () => {
+	const scheduled: Array<{ loopId: string; delayMs: number }> = [];
+	await withDaemon(async (baseUrl, token, mock) => {
+		const source = piCommandSource();
+		const started = await postJson<{ activeLoop?: { id: string } }>(baseUrl, token, "/loops/start", {
+			requestId: "req_loop_start_draft",
+			source,
+			targetRef: "surface:42",
+			goal: { value: "Ask for cleanup advice.", redaction: { status: "not_needed" } },
+			maxTurns: 4,
+			pollIntervalMs: 3_000,
+			allowedCapabilities: source.capabilities,
+		});
+		const polled = await postJson<{ ok: boolean; pendingDraft?: AlfredDraft; activeLoop?: { turns: number; status: string }; events: Array<{ kind: string }> }>(baseUrl, token, "/loops/poll", {
+			requestId: "req_loop_poll_draft",
+			loopId: started.body.activeLoop?.id,
+			source,
+		});
+
+		assert.equal(polled.status, 200);
+		assert.equal(polled.body.ok, true);
+		assert.equal(polled.body.pendingDraft?.target.ref, "surface:42");
+		assert.equal(polled.body.pendingDraft?.text.value, "Please list the files I can delete now.");
+		assert.equal(polled.body.activeLoop?.turns, 1);
+		assert.equal(polled.body.events.some((event) => event.kind === "loop.replied"), true);
+		assert.deepEqual(mock.sends, []);
+		assert.equal(scheduled.some((entry) => entry.delayMs === 3_000), true);
+	}, {
+		loopDecider: async () => ({ kind: "draft_reply", message: "Please list the files I can delete now." }),
+		loopScheduler: { schedule(loopId, delayMs) { scheduled.push({ loopId, delayMs }); }, cancel() { /* test seam */ } },
+	});
+});
+
+test("loop poll can autonomously send only with loop.autonomousSend", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const source = piCommandSource({ capabilities: [...piCommandSource().capabilities, "loop.autonomousSend"] });
+		const started = await postJson<{ activeLoop?: { id: string } }>(baseUrl, token, "/loops/start", {
+			requestId: "req_loop_start_auto",
+			source,
+			targetRef: "surface:42",
+			goal: { value: "Ask for cleanup advice.", redaction: { status: "not_needed" } },
+			maxTurns: 4,
+			pollIntervalMs: 3_000,
+			allowedCapabilities: source.capabilities,
+		});
+		const polled = await postJson<{ ok: boolean; pendingDraft?: AlfredDraft; proposedActions: Array<{ kind: string; status: string }>; activeLoop?: { turns: number }; events: Array<{ kind: string }> }>(baseUrl, token, "/loops/poll", {
+			requestId: "req_loop_poll_auto",
+			loopId: started.body.activeLoop?.id,
+			source,
+		});
+
+		assert.equal(polled.status, 200);
+		assert.equal(polled.body.ok, true);
+		assert.equal(polled.body.pendingDraft, undefined);
+		assert.deepEqual(mock.sends, [{ kind: "surface", ref: "surface:42", text: "Please list the files I can delete now." }]);
+		assert.equal(polled.body.proposedActions[0]?.kind, "send");
+		assert.equal(polled.body.proposedActions[0]?.status, "succeeded");
+		assert.equal(polled.body.activeLoop?.turns, 1);
+	}, { loopDecider: async () => ({ kind: "draft_reply", message: "Please list the files I can delete now." }) });
+});
+
+test("autonomous loop send failures do not claim success", async () => {
+	const mock = createMockCmux({ sendError: { code: "command_failed", message: "cmux send failed" } });
+	const daemon = createAlfredDaemon(
+		{ host: "127.0.0.1", port: 0, authToken: "test-token" },
+		{
+			cmux: mock.cmux,
+			now: () => new Date("2026-06-19T22:00:00.000Z"),
+			loopDecider: async () => ({ kind: "draft_reply", message: "Please list the files I can delete now." }),
+		},
+	);
+	const startedDaemon = await daemon.start();
+	const baseUrl = `http://${startedDaemon.host}:${startedDaemon.port}`;
+	try {
+		const source = piCommandSource({ capabilities: [...piCommandSource().capabilities, "loop.autonomousSend"] });
+		const started = await postJson<{ activeLoop?: { id: string } }>(baseUrl, startedDaemon.authToken, "/loops/start", {
+			requestId: "req_loop_start_send_failure",
+			source,
+			targetRef: "surface:42",
+			goal: { value: "Ask for cleanup advice.", redaction: { status: "not_needed" } },
+			maxTurns: 4,
+			pollIntervalMs: 3_000,
+			allowedCapabilities: source.capabilities,
+		});
+		const polled = await postJson<{ ok: boolean; errors: Array<{ code: string }>; proposedActions: Array<{ status: string }>; events: Array<{ kind: string }> }>(baseUrl, startedDaemon.authToken, "/loops/poll", {
+			requestId: "req_loop_poll_send_failure",
+			loopId: started.body.activeLoop?.id,
+			source,
+		});
+
+		assert.equal(polled.status, 400);
+		assert.equal(polled.body.ok, false);
+		assert.equal(polled.body.errors[0]?.code, "send_failed");
+		assert.equal(polled.body.proposedActions[0]?.status, "failed");
+		assert.equal(polled.body.events.some((event) => event.kind === "send.succeeded"), false);
+		assert.equal(mock.sends.length, 1);
+	} finally {
+		await daemon.stop();
+	}
+});
+
+test("loop start and poll fail closed for missing capabilities or targets", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const denied = await postJson<{ ok: boolean; errors: Array<{ code: string }> }>(baseUrl, token, "/loops/start", {
+			requestId: "req_loop_start_denied",
+			source: cliSource(),
+			targetRef: "surface:42",
+			goal: { value: "Do work.", redaction: { status: "not_needed" } },
+			maxTurns: 4,
+			pollIntervalMs: 3_000,
+			allowedCapabilities: cliSource().capabilities,
+		});
+		assert.equal(denied.status, 400);
+		assert.equal(denied.body.errors[0]?.code, "capability_denied");
+
+		const source = piCommandSource();
+		const started = await postJson<{ activeLoop?: { id: string } }>(baseUrl, token, "/loops/start", {
+			requestId: "req_loop_start_missing_target",
+			source,
+			targetRef: "surface:42",
+			goal: { value: "Do work.", redaction: { status: "not_needed" } },
+			maxTurns: 4,
+			pollIntervalMs: 3_000,
+			allowedCapabilities: source.capabilities,
+		});
+		mock.setTargets([]);
+		const polled = await postJson<{ ok: boolean; activeLoop?: { status: string }; events: Array<{ kind: string }> }>(baseUrl, token, "/loops/poll", {
+			requestId: "req_loop_poll_missing_target",
+			loopId: started.body.activeLoop?.id,
+			source,
+		});
+		assert.equal(polled.status, 200);
+		assert.equal(polled.body.ok, true);
+		assert.equal(polled.body.events[0]?.kind, "loop.needs_user");
+		assert.equal(polled.body.activeLoop?.status, "failed");
+	});
+});
+
 test("cancel removes a pending draft and records history", async () => {
 	await withDaemon(async (baseUrl, token) => {
 		const draft = (await createPowercoDraft(baseUrl, token)).body.pendingDraft;
@@ -465,6 +660,7 @@ test("daemon reports structured errors for bad JSON and unavailable cmux", async
 		{
 			cmux: {
 				async listTargets() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
+				async readSurface() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async sendTextToSurface() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async sendTextToWorkspace() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 			},

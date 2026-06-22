@@ -9,6 +9,8 @@ import type {
 	AlfredEvent,
 	AlfredHandleRequest,
 	AlfredHandleResponse,
+	AlfredId,
+	AlfredLoopSummary,
 	AlfredRef,
 	AlfredSendAction,
 	AlfredSource,
@@ -21,6 +23,7 @@ import { DEFAULT_DRAFT_TTL_MS, redactedText, sourceHasCapabilities } from "../co
 import { createCmuxWorldModelAdapter, type CmuxResult, type CmuxWorldModelAdapter } from "../cmux/index.ts";
 import { formatHostForUrl } from "../lib/host-formatting.ts";
 import { buildPlannerInput, plannerInputSummary, validatePlannerResult, type AlfredPlanner, type AlfredPlannerIntent, type AlfredPlannerResult } from "../planner/index.ts";
+import { createAlfredLoopManager, type AlfredLoopDecision, type AlfredLoopManager, type AlfredLoopRuntimeState, type AlfredLoopScheduler, type AlfredLoopStartRequest } from "../loops/index.ts";
 
 export interface AlfredDaemonConfig {
 	readonly host: string;
@@ -34,17 +37,20 @@ export interface AlfredDaemonConfig {
 export interface AlfredDaemonStateSnapshot {
 	health: "ok" | "degraded";
 	pendingDrafts: AlfredDraft[];
-	activeLoop: null;
+	activeLoop: AlfredLoopSummary | null;
 	recentTargets: AlfredTarget[];
 	events: AlfredEvent[];
 }
 
-type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "sendTextToSurface" | "sendTextToWorkspace">;
+type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace">;
 
 export interface AlfredDaemonDependencies {
 	cmux?: AlfredDaemonCmux;
 	now?: () => Date;
 	planner?: AlfredPlanner;
+	loopDecider?: (loop: AlfredLoopRuntimeState, transcript: string) => Promise<AlfredLoopDecision>;
+	loopScheduler?: AlfredLoopScheduler;
+	loopManager?: AlfredLoopManager;
 }
 
 export interface AlfredDaemon {
@@ -63,6 +69,20 @@ export interface AlfredCancelRequest {
 	requestId?: string;
 	draftId?: string;
 	source?: AlfredSource;
+	reason?: string;
+}
+
+export interface AlfredLoopPollRequest {
+	requestId?: string;
+	loopId?: AlfredId;
+	source?: AlfredSource;
+}
+
+export interface AlfredLoopStopRequest {
+	requestId?: string;
+	loopId?: AlfredId;
+	source?: AlfredSource;
+	interruptTarget?: boolean;
 	reason?: string;
 }
 
@@ -107,8 +127,9 @@ export function createAlfredDaemon(
 	const cmux = dependencies.cmux ?? createCmuxWorldModelAdapter();
 	const now = dependencies.now ?? (() => new Date());
 	const planner = dependencies.planner;
+	const loopManager = dependencies.loopManager ?? createAlfredLoopManager({ cmux, now, nextId, decide: dependencies.loopDecider, scheduler: dependencies.loopScheduler });
 	const server = http.createServer((request, response) => {
-		void handleDaemonRequest(request, response, resolvedConfig, state, cmux, now, planner);
+		void handleDaemonRequest(request, response, resolvedConfig, state, cmux, now, planner, loopManager);
 	});
 
 	return {
@@ -156,6 +177,7 @@ async function handleDaemonRequest(
 	cmux: AlfredDaemonCmux,
 	now: () => Date,
 	planner?: AlfredPlanner,
+	loopManager?: AlfredLoopManager,
 ): Promise<void> {
 	const url = new URL(request.url ?? "/", `http://${request.headers.host ?? config.host}`);
 	const authOptionalRoute = request.method === "GET" && (url.pathname === "/health" || url.pathname === "/" || url.pathname === "/dashboard");
@@ -178,7 +200,7 @@ async function handleDaemonRequest(
 	pruneExpiredDrafts(state, now().toISOString());
 
 	if (request.method === "GET" && url.pathname === "/state") {
-		writeJson(response, 200, snapshotState(state));
+		writeJson(response, 200, snapshotState(state, loopManager));
 		return;
 	}
 
@@ -230,6 +252,46 @@ async function handleDaemonRequest(
 		}
 		const result = cancelDraft(body.value, state, now);
 		writeJson(response, result.ok ? 200 : 400, result);
+		return;
+	}
+
+	if (request.method === "POST" && url.pathname === "/loops/start") {
+		const body = await readJsonBody<AlfredLoopStartRequest>(request, config.maxBodyBytes);
+		if (!body.ok) {
+			writeJson(response, 400, { ok: false, error: { code: "invalid_request", message: body.error, retryable: false } });
+			return;
+		}
+		const startRequest = normalizeLoopStartRequest(body.value);
+		const result = loopManager ? await loopManager.start(startRequest) : unsupportedLoopResponse(startRequest.requestId, now().toISOString());
+		recordResponseEvents(state, result.events);
+		writeJson(response, result.ok ? 200 : 400, result);
+		return;
+	}
+
+	if (request.method === "POST" && url.pathname === "/loops/poll") {
+		const body = await readJsonBody<AlfredLoopPollRequest>(request, config.maxBodyBytes);
+		if (!body.ok) {
+			writeJson(response, 400, { ok: false, error: { code: "invalid_request", message: body.error, retryable: false } });
+			return;
+		}
+		const result = await pollLoop(body.value, state, cmux, now, loopManager);
+		writeJson(response, result.ok ? 200 : 400, result);
+		return;
+	}
+
+	if (request.method === "POST" && url.pathname === "/loops/stop") {
+		const body = await readJsonBody<AlfredLoopStopRequest>(request, config.maxBodyBytes);
+		if (!body.ok) {
+			writeJson(response, 400, { ok: false, error: { code: "invalid_request", message: body.error, retryable: false } });
+			return;
+		}
+		const result = await stopLoop(body.value, state, now, loopManager);
+		writeJson(response, result.ok ? 200 : 400, result);
+		return;
+	}
+
+	if (request.method === "GET" && url.pathname === "/loops/status") {
+		writeJson(response, 200, { ok: true, activeLoop: loopManager?.status(url.searchParams.get("loopId") ?? undefined) ?? null });
 		return;
 	}
 
@@ -586,6 +648,232 @@ function cancelDraft(request: AlfredCancelRequest, state: DaemonState, now: () =
 		events: [event],
 		nextStatePatch: { rememberDraftId: null },
 	};
+}
+
+function normalizeLoopStartRequest(request: AlfredLoopStartRequest): AlfredLoopStartRequest {
+	return {
+		...request,
+		requestId: request.requestId ?? nextId("req_loop_start"),
+		goal: request.goal ?? redactedText(""),
+		allowedCapabilities: request.allowedCapabilities ?? request.source?.capabilities ?? [],
+	};
+}
+
+async function pollLoop(
+	request: AlfredLoopPollRequest,
+	state: DaemonState,
+	cmux: AlfredDaemonCmux,
+	now: () => Date,
+	loopManager?: AlfredLoopManager,
+): Promise<AlfredHandleResponse> {
+	const createdAt = now().toISOString();
+	const active = loopManager?.active();
+	const loopId = request.loopId ?? active?.summary.id;
+	const requestId = request.requestId ?? nextId("req_loop_poll");
+	if (!loopManager || !loopId || !active || active.summary.id !== loopId) {
+		return loopErrorResponse(requestId, createdAt, "There is no active loop to poll.", { code: "loop_not_found", message: "Loop not found.", retryable: false });
+	}
+	if (request.source && !sourceHasCapabilities(request.source, ["loop.manage"])) {
+		return capabilityDeniedResponse(requestId, createdAt, "Missing loop.manage capability");
+	}
+	const decision = await loopManager.poll(loopId);
+	if (decision.kind === "draft_reply") {
+		return await handleLoopDraftReply(requestId, decision, state, cmux, now, loopManager);
+	}
+	const event = pushLoopDecisionEvent(state, requestId, createdAt, active, decision);
+	return {
+		requestId,
+		createdAt,
+		ok: true,
+		displayText: loopDecisionDisplayText(decision, active.summary.target.label),
+		proposedActions: [],
+		activeLoop: loopManager.status(loopId) ?? active.summary,
+		events: [event],
+		nextStatePatch: { activeLoopId: loopManager.status(loopId)?.id ?? null },
+	};
+}
+
+async function handleLoopDraftReply(
+	requestId: AlfredId,
+	decision: Extract<AlfredLoopDecision, { kind: "draft_reply" }>,
+	state: DaemonState,
+	cmux: AlfredDaemonCmux,
+	now: () => Date,
+	loopManager: AlfredLoopManager,
+): Promise<AlfredHandleResponse> {
+	const active = loopManager.active();
+	const createdAt = now().toISOString();
+	if (!active) {
+		return loopErrorResponse(requestId, createdAt, "There is no active loop to poll.", { code: "loop_not_found", message: "Loop not found.", retryable: false });
+	}
+	if (!sourceHasCapabilities(active.source, ["loop.autonomousSend"])) {
+		const draftResponse = createDraftResponse({
+			requestId,
+			createdAt,
+			source: active.source,
+			input: { text: "loop draft reply" },
+			context: { currentWorkspaceRef: active.summary.target.workspaceRef, currentSurfaceRef: active.summary.target.surfaceRef },
+			policy: { requireConfirmationForSend: true },
+		}, active.source, { target: active.summary.target, message: decision.message, confidence: active.summary.target.confidence ?? "unknown" }, state, now);
+		if (draftResponse.ok) {
+			loopManager.recordReplyDrafted(active.summary.id);
+			const event = pushLoopLifecycleEvent(state, requestId, now().toISOString(), active, "loop.replied", "Drafted loop reply pending confirmation.", redactedText(decision.message).redaction);
+			return {
+				...draftResponse,
+				displayText: `${draftResponse.displayText} Loop reply is pending confirmation.`,
+				activeLoop: loopManager.status(active.summary.id) ?? active.summary,
+				events: [...draftResponse.events, event],
+				nextStatePatch: { ...draftResponse.nextStatePatch, activeLoopId: active.summary.id },
+			};
+		}
+		return draftResponse;
+	}
+	return await sendAutonomousLoopReply(requestId, decision.message, state, cmux, now, loopManager, active);
+}
+
+async function sendAutonomousLoopReply(
+	requestId: AlfredId,
+	message: string,
+	state: DaemonState,
+	cmux: AlfredDaemonCmux,
+	now: () => Date,
+	loopManager: AlfredLoopManager,
+	active: NonNullable<ReturnType<AlfredLoopManager["active"]>>,
+): Promise<AlfredHandleResponse> {
+	const createdAt = now().toISOString();
+	const requiredCapabilities: AlfredCapability[] = [...requiredSendCapabilities(active.summary.target), "loop.autonomousSend"];
+	if (!sourceHasCapabilities(active.source, requiredCapabilities)) {
+		return capabilityDeniedResponse(requestId, createdAt, `Source lacks ${requiredCapabilities.join(", ")} capability.`);
+	}
+	const draft: AlfredDraft = {
+		id: nextId("draft_loop_autonomous"),
+		target: active.summary.target,
+		text: redactedText(message),
+		createdAt,
+		expiresAt: createdAt,
+		status: "confirmed",
+		createdBy: active.source,
+	};
+	pushEvent(state, {
+		id: nextId("evt"),
+		kind: "send.started",
+		createdAt,
+		requestId,
+		source: { kind: active.source.kind, id: active.source.id, label: active.source.label },
+		target: active.summary.target,
+		summary: `Started autonomous loop reply to ${active.summary.target.label}.`,
+		redaction: draft.text.redaction,
+		retention: defaultEventRetention(createdAt),
+	});
+	const sendResult = await sendDraft(cmux, active.summary.target, message);
+	if (!sendResult.ok) {
+		const failedAt = now().toISOString();
+		const failedEvent = pushSendFailedEvent(state, requestId, failedAt, active.source, draft, sendResult.error.message, active.summary.target);
+		return {
+			requestId,
+			createdAt: failedAt,
+			ok: false,
+			displayText: `Loop reply failed for ${active.summary.target.label}. ${sendResult.error.message}`,
+			proposedActions: [sendAction(draft, active.source, failedAt, "failed", sendResult.error.message, active.summary.target)],
+			activeLoop: loopManager.status(active.summary.id) ?? active.summary,
+			events: [failedEvent],
+			errors: [{ code: "send_failed", message: sendResult.error.message, retryable: true }],
+		};
+	}
+	loopManager.recordReplyDrafted(active.summary.id);
+	const sentAt = now().toISOString();
+	const loopEvent = pushLoopLifecycleEvent(state, requestId, sentAt, active, "loop.replied", `Sent autonomous loop reply to ${active.summary.target.label}.`, draft.text.redaction);
+	const sentEvent = pushEvent(state, {
+		id: nextId("evt"),
+		kind: "send.succeeded",
+		createdAt: sentAt,
+		requestId,
+		source: { kind: active.source.kind, id: active.source.id, label: active.source.label },
+		target: active.summary.target,
+		summary: `Sent autonomous loop reply to ${active.summary.target.label}.`,
+		redaction: draft.text.redaction,
+		retention: defaultEventRetention(sentAt),
+	});
+	return {
+		requestId,
+		createdAt: sentAt,
+		ok: true,
+		displayText: `Loop reply sent to ${active.summary.target.label}.`,
+		proposedActions: [sendAction(draft, active.source, sentAt, "succeeded", undefined, active.summary.target)],
+		activeLoop: loopManager.status(active.summary.id) ?? active.summary,
+		events: [loopEvent, sentEvent],
+		nextStatePatch: { activeLoopId: active.summary.id },
+	};
+}
+
+async function stopLoop(
+	request: AlfredLoopStopRequest,
+	state: DaemonState,
+	now: () => Date,
+	loopManager?: AlfredLoopManager,
+): Promise<AlfredHandleResponse> {
+	const createdAt = now().toISOString();
+	const active = loopManager?.active();
+	const loopId = request.loopId ?? active?.summary.id;
+	const requestId = request.requestId ?? nextId("req_loop_stop");
+	if (!loopManager || !loopId) {
+		return loopErrorResponse(requestId, createdAt, "There is no active loop to stop.", { code: "loop_not_found", message: "Loop not found.", retryable: false });
+	}
+	if (request.source && !sourceHasCapabilities(request.source, ["loop.manage"])) {
+		return capabilityDeniedResponse(requestId, createdAt, "Missing loop.manage capability");
+	}
+	const result = await loopManager.stop(loopId, { requestId, source: request.source, interruptTarget: request.interruptTarget, reason: request.reason });
+	recordResponseEvents(state, result.events);
+	return result;
+}
+
+function pushLoopDecisionEvent(state: DaemonState, requestId: AlfredId, createdAt: IsoTimestamp, active: NonNullable<ReturnType<AlfredLoopManager["active"]>>, decision: AlfredLoopDecision): AlfredEvent {
+	const kind = decision.kind === "wait" ? "loop.waiting" : decision.kind === "done" ? "loop.done" : decision.kind === "needs_user" ? "loop.needs_user" : "loop.replied";
+	return pushLoopLifecycleEvent(state, requestId, createdAt, active, kind, loopDecisionDisplayText(decision, active.summary.target.label), active.summary.goal.redaction);
+}
+
+function pushLoopLifecycleEvent(
+	state: DaemonState,
+	requestId: AlfredId,
+	createdAt: IsoTimestamp,
+	active: NonNullable<ReturnType<AlfredLoopManager["active"]>>,
+	kind: Extract<AlfredEvent["kind"], "loop.waiting" | "loop.replied" | "loop.needs_user" | "loop.done" | "loop.stopped" | "loop.started">,
+	summary: string,
+	redaction: RedactedText["redaction"],
+): AlfredEvent {
+	return pushEvent(state, {
+		id: nextId("evt"),
+		kind,
+		createdAt,
+		requestId,
+		source: { kind: active.source.kind, id: active.source.id, label: active.source.label },
+		target: active.summary.target,
+		loopId: active.summary.id,
+		summary,
+		redaction,
+		retention: defaultEventRetention(createdAt),
+	});
+}
+
+function loopDecisionDisplayText(decision: AlfredLoopDecision, targetLabel: string): string {
+	if (decision.kind === "wait") return decision.reason ? `Loop waiting for ${targetLabel}: ${decision.reason}` : `Loop waiting for ${targetLabel}.`;
+	if (decision.kind === "done") return `Loop done for ${targetLabel}: ${decision.summary}`;
+	if (decision.kind === "needs_user") return `Loop needs you for ${targetLabel}: ${decision.summary}`;
+	return `Loop drafted a reply for ${targetLabel}.`;
+}
+
+function loopErrorResponse(requestId: AlfredId, createdAt: IsoTimestamp, displayText: string, error: AlfredError): AlfredHandleResponse {
+	return { requestId, createdAt, ok: false, displayText, proposedActions: [], events: [], errors: [error] };
+}
+
+function unsupportedLoopResponse(requestId: AlfredId, createdAt: IsoTimestamp): AlfredHandleResponse {
+	return loopErrorResponse(requestId, createdAt, "Loop manager is unavailable.", { code: "internal_error", message: "Loop manager is unavailable.", retryable: true });
+}
+
+function recordResponseEvents(state: DaemonState, events: readonly AlfredEvent[]): void {
+	for (const event of [...events].reverse()) {
+		pushEvent(state, event);
+	}
 }
 
 function resolvePlannerDraftIntent(intent: Extract<AlfredPlannerIntent, { kind: "draft_message" }>, targets: AlfredTarget[], currentWorkspaceRef?: AlfredRef): PlannerDraftResolution {
@@ -1120,11 +1408,11 @@ li { border: 1px solid color-mix(in srgb, CanvasText 12%, transparent); border-r
 </html>`;
 }
 
-function snapshotState(state: DaemonState): AlfredDaemonStateSnapshot {
+function snapshotState(state: DaemonState, loopManager?: AlfredLoopManager): AlfredDaemonStateSnapshot {
 	return {
 		health: "ok",
 		pendingDrafts: state.pendingDrafts,
-		activeLoop: null,
+		activeLoop: loopManager?.status() ?? null,
 		recentTargets: state.recentTargets,
 		events: state.events,
 	};
