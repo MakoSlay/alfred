@@ -19,9 +19,10 @@ h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 
 h2::before { content: ""; width: 9px; height: 9px; border-radius: 999px; background: var(--cyan); box-shadow: 0 0 14px var(--cyan); }
 h3 { margin: 0 0 6px; font-size: 0.9rem; }
 p { margin: 0; }
-button, input { font: inherit; }
-input { width: min(100%, 34rem); min-width: 0; padding: 11px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(1, 8, 18, 0.82); color: var(--text); outline: none; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02); }
-input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(102, 231, 255, 0.12), inset 0 0 24px rgba(102, 231, 255, 0.05); }
+button, input, textarea { font: inherit; }
+input, textarea { width: min(100%, 34rem); min-width: 0; padding: 11px 12px; border: 1px solid var(--border); border-radius: 12px; background: rgba(1, 8, 18, 0.82); color: var(--text); outline: none; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02); }
+textarea { width: 100%; min-height: 7rem; margin-top: 8px; resize: vertical; }
+input:focus, textarea:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(102, 231, 255, 0.12), inset 0 0 24px rgba(102, 231, 255, 0.05); }
 button { padding: 10px 13px; cursor: pointer; border: 1px solid var(--border); border-radius: 12px; background: linear-gradient(180deg, rgba(102, 231, 255, 0.14), rgba(102, 231, 255, 0.04)); color: var(--text); box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease; }
 button:hover { border-color: var(--border-strong); box-shadow: 0 0 22px rgba(102, 231, 255, 0.12); transform: translateY(-1px); }
 button.danger { color: var(--danger); border-color: rgba(255, 93, 122, 0.38); background: linear-gradient(180deg, rgba(255, 93, 122, 0.12), rgba(255, 93, 122, 0.03)); }
@@ -87,14 +88,23 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
     </div>
     <div id="warnings" class="meta">Storage warnings will appear here if Alfred starts in degraded mode.</div>
   </section>
+  <section aria-labelledby="ask-heading">
+    <h2 id="ask-heading">Ask Alfred</h2>
+    <p class="copy">Ask routes through <code>POST /ask</code>, the same authenticated pipeline used by legacy <code>/handle</code>. Sends still become pending action cards.</p>
+    <textarea id="ask-input" spellcheck="true" placeholder="e.g. ask my Power Code session to run tests"></textarea>
+    <div class="actions">
+      <button id="ask-submit" class="primary" type="button">Ask Alfred</button>
+    </div>
+    <p id="ask-result" class="meta">No request sent yet.</p>
+  </section>
   <div class="grid">
     <section aria-labelledby="loop-heading">
       <h2 id="loop-heading">Active loop</h2>
       <div id="loop"><p class="empty">No loop status loaded yet.</p></div>
     </section>
     <section aria-labelledby="drafts-heading">
-      <h2 id="drafts-heading">Pending drafts</h2>
-      <p class="copy">Review before sending. Confirm and cancel buttons call authenticated APIs and never bypass draft-confirm.</p>
+      <h2 id="drafts-heading">Pending action cards</h2>
+      <p class="copy">Review or edit before sending. Confirm and cancel buttons call authenticated APIs and never bypass draft-confirm.</p>
       <ul id="drafts"><li class="empty">Not loaded.</li></ul>
     </section>
     <section aria-labelledby="surfaces-heading">
@@ -123,6 +133,8 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
   const counts = document.getElementById('counts');
   const warnings = document.getElementById('warnings');
   const loop = document.getElementById('loop');
+  const askInput = document.getElementById('ask-input');
+  const askResult = document.getElementById('ask-result');
 
   tokenInput.value = localStorage.getItem(STORAGE_KEY) || '';
   endpoint.textContent = window.location.origin;
@@ -184,7 +196,7 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
     health.textContent = healthText;
     health.className = healthText === 'ok' ? 'ok' : healthText === 'degraded' ? 'warning' : '';
     lastRefresh.textContent = new Date().toLocaleTimeString();
-    counts.textContent = (surfaceItems?.length || 0) + ' targets · ' + (state?.pendingDrafts?.length || 0) + ' drafts · ' + (state?.events?.length || 0) + ' events';
+    counts.textContent = (surfaceItems?.length || 0) + ' targets · ' + (state?.pendingActions?.length || state?.pendingDrafts?.length || 0) + ' pending actions · ' + (state?.events?.length || 0) + ' events';
     warnings.replaceChildren();
     const items = state?.storageWarnings || [];
     if (!items.length) {
@@ -238,16 +250,21 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
       const item = document.createElement('li');
       const title = document.createElement('strong');
       title.textContent = draft.target?.label || draft.target?.ref || draft.id;
-      const text = document.createElement('pre');
-      text.textContent = safeRedactedText(draft.text) || '[empty draft]';
-      const expires = line('meta warning', 'Expires ' + draft.expiresAt + ' · created by ' + (draft.createdBy?.label || draft.createdBy?.kind || 'unknown'));
+      const text = document.createElement('textarea');
+      const redactionStatus = draft.text?.redaction?.status;
+      const editableText = redactionStatus !== 'contains_sensitive' && redactionStatus !== 'redacted';
+      text.value = editableText ? (draft.text?.value || '') : '';
+      text.placeholder = editableText ? '' : '[redacted by Alfred; edit disabled]';
+      text.disabled = !editableText;
+      text.setAttribute('aria-label', 'Editable draft text for ' + (draft.target?.label || draft.id));
+      const expires = line('meta warning', 'Action ' + draft.id + ' · expires ' + draft.expiresAt + ' · created by ' + (draft.createdBy?.label || draft.createdBy?.kind || 'unknown'));
       const actions = document.createElement('div');
       actions.className = 'actions';
       const confirm = document.createElement('button');
       confirm.type = 'button';
       confirm.className = 'primary';
       confirm.textContent = 'Confirm send';
-      confirm.addEventListener('click', () => confirmDraft(draft.id, draft.target?.label || draft.target?.ref || draft.id).catch((error) => setStatus(error.message, 'error')));
+      confirm.addEventListener('click', () => confirmDraft(draft.id, draft.target?.label || draft.target?.ref || draft.id, text.disabled ? undefined : text.value).catch((error) => setStatus(error.message, 'error')));
       const cancel = document.createElement('button');
       cancel.type = 'button';
       cancel.className = 'danger';
@@ -272,6 +289,18 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
     }
   }
 
+  function dashboardSource() {
+    return {
+      kind: 'web-ui',
+      id: 'dashboard',
+      label: 'Alfred dashboard',
+      trustedLocalOnly: true,
+      userIntent: 'typed',
+      capabilities: ['world.read', 'surface.read', 'surface.send', 'workspace.send', 'loop.manage', 'history.read', 'history.write', 'config.read'],
+      presentation: { wantsText: true, style: 'plain' }
+    };
+  }
+
   async function refresh() {
     if (!token()) {
       setStatus('Enter the local token printed in the daemon terminal before loading daemon state.', 'error');
@@ -288,16 +317,42 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
     setStatus('Updated ' + new Date().toLocaleTimeString() + '. API requests used the local auth header.');
   }
 
-  async function confirmDraft(draftId, label) {
-    if (!window.confirm('Send this pending draft to ' + label + '? This cannot be undone.')) return;
-    setStatus('Confirming draft through authenticated /confirm...');
-    await api('/confirm', { method: 'POST', body: JSON.stringify({ draftId }) });
+  async function confirmDraft(draftId, label, text) {
+    if (!window.confirm('Send this pending action to ' + label + '? This cannot be undone.')) return;
+    setStatus('Confirming pending action through authenticated /confirm...');
+    await api('/confirm', { method: 'POST', body: JSON.stringify({ draftId, text }) });
     await refresh();
   }
 
   async function cancelDraft(draftId) {
     setStatus('Cancelling draft through authenticated /cancel...');
     await api('/cancel', { method: 'POST', body: JSON.stringify({ draftId, reason: 'dashboard cancel' }) });
+    await refresh();
+  }
+
+  async function askAlfred() {
+    if (!token()) {
+      setStatus('Enter the local token before asking Alfred.', 'error');
+      return;
+    }
+    const text = askInput.value.trim();
+    if (!text) {
+      askResult.textContent = 'Type a request first.';
+      return;
+    }
+    setStatus('Sending Ask Alfred request through authenticated /ask...');
+    const requestId = 'dashboard_' + Date.now().toString(36);
+    const result = await api('/ask', {
+      method: 'POST',
+      body: JSON.stringify({
+        requestId,
+        createdAt: new Date().toISOString(),
+        source: dashboardSource(),
+        input: { text },
+        policy: { requireConfirmationForSend: true }
+      })
+    });
+    askResult.textContent = result.displayText || 'Alfred handled the request.';
     await refresh();
   }
 
@@ -311,6 +366,7 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
     setStatus('Token removed from localStorage.');
   });
   document.getElementById('refresh').addEventListener('click', () => refresh().catch((error) => setStatus(error.message, 'error')));
+  document.getElementById('ask-submit').addEventListener('click', () => askAlfred().catch((error) => setStatus(error.message, 'error')));
   if (token()) refresh().catch((error) => setStatus(error.message, 'error'));
 })();
 </script>

@@ -5,6 +5,8 @@ export type AlfredRef = string;
 export type AlfredSourceKind = "pi-command" | "cli" | "web-ui" | "voice" | "text" | "system";
 export type AlfredTargetKind = "cmux-workspace" | "cmux-surface" | "pi-chat" | "codex-session" | "terminal" | "unknown";
 export type AlfredActionKind = "draft" | "confirm" | "cancel" | "send" | "loop.start" | "loop.stop" | "loop.status" | "status";
+export type AlfredActionRiskLevel = "safe" | "confirmation_required" | "restricted";
+export type PendingActionStatus = "pending" | "approved" | "cancelled" | "denied" | "expired" | "executing" | "executed" | "failed";
 export type AlfredCapability =
 	| "world.read"
 	| "surface.read"
@@ -80,6 +82,9 @@ export interface AlfredHandleResponse {
 	speech?: string;
 	displayText: string;
 	proposedActions: AlfredAction[];
+	/** Canonical approval record for confirmation-required/restricted actions. */
+	pendingAction?: PendingAction;
+	/** Compatibility view for legacy draft-confirm callers. Derived from pendingAction. */
 	pendingDraft?: AlfredDraft;
 	activeLoop?: AlfredLoopSummary;
 	events: AlfredEvent[];
@@ -170,6 +175,45 @@ export interface AlfredDraft {
 	createdBy: AlfredSource;
 }
 
+export interface TemporaryGrant {
+	id: AlfredId;
+	actionMetaId: string;
+	scope: "one_action" | "time_window" | "this_session";
+	expiresAt?: IsoTimestamp;
+	grantedBy: AlfredSource;
+	grantedAt: IsoTimestamp;
+	/** Optional target binding for restricted grants. */
+	targetRef?: AlfredRef;
+}
+
+export interface PendingAction {
+	id: AlfredId;
+	actionId: string;
+	/** Resolved action metadata id. */
+	actionMetaId: string;
+	/** Human-readable label for cards. */
+	label: string;
+	/** Risk level at time of proposal. */
+	riskLevel: AlfredActionRiskLevel;
+	/** Resolved target snapshot; approval/execution integrations should re-resolve live targets before side effects. */
+	target?: AlfredTarget;
+	/** Preview payload built by the action. */
+	preview: Record<string, unknown>;
+	/** Validated input payload. */
+	input: Record<string, unknown>;
+	/** Source that proposed the action. */
+	proposedBy: AlfredSource;
+	createdAt: IsoTimestamp;
+	expiresAt: IsoTimestamp;
+	status: PendingActionStatus;
+	/** Whether the input is editable before approval. */
+	editable: boolean;
+	/** Result payload after execution. */
+	result?: Record<string, unknown>;
+	/** Grant that authorized restricted execution, if any. */
+	grant?: TemporaryGrant;
+}
+
 export interface AlfredLoopSummary {
 	id: AlfredId;
 	target: AlfredTarget;
@@ -196,6 +240,14 @@ export type AlfredEventKind =
 	| "draft.created"
 	| "draft.confirmed"
 	| "draft.cancelled"
+	| "action.proposed"
+	| "action.approved"
+	| "action.edited"
+	| "action.cancelled"
+	| "action.denied"
+	| "action.expired"
+	| "action.executed"
+	| "action.failed"
 	| "send.started"
 	| "send.succeeded"
 	| "send.failed"

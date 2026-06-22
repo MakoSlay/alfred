@@ -23,9 +23,11 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 		{ ...powerCodeTarget({ ref: "surface:55", label: "Codex Review", processKind: "codex", kind: "codex-session", surfaceRef: "surface:55" }) },
 	];
 	const sends: Array<{ kind: "surface" | "workspace"; ref: string; text: string }> = [];
+	const openedDiffs: Array<Record<string, unknown> | undefined> = [];
 	let targets = options.targets ?? defaultTargets;
 	return {
 		sends,
+		openedDiffs,
 		setTargets(nextTargets: AlfredTarget[]) {
 			targets = nextTargets;
 		},
@@ -43,6 +45,10 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 			async sendTextToWorkspace(workspaceRef: string, text: string) {
 				sends.push({ kind: "workspace" as const, ref: workspaceRef, text });
 				return options.sendError ? { ok: false as const, error: options.sendError } : { ok: true as const, value: { workspaceRef } };
+			},
+			async openDiff(options?: Record<string, unknown>) {
+				openedDiffs.push(options);
+				return { ok: true as const, value: { opened: true } };
 			},
 		},
 	};
@@ -90,7 +96,7 @@ async function postJson<T>(baseUrl: string, token: string, path: string, body: u
 	return { status: response.status, body: await response.json() as T };
 }
 
-async function createPowercoDraft(baseUrl: string, token: string): Promise<{ status: number; body: { ok: boolean; pendingDraft?: AlfredDraft; events: Array<{ kind: string }>; proposedActions: Array<{ kind: string; status: string }> } }> {
+async function createPowercoDraft(baseUrl: string, token: string): Promise<{ status: number; body: { ok: boolean; pendingAction?: { id: string; actionMetaId: string; status: string; input: Record<string, unknown> }; pendingDraft?: AlfredDraft; events: Array<{ kind: string }>; proposedActions: Array<{ kind: string; status: string }> } }> {
 	return await postJson(baseUrl, token, "/handle", {
 		requestId: "req_powerco_draft",
 		createdAt: "2026-06-19T21:59:59.000Z",
@@ -196,6 +202,63 @@ test("POST /handle returns typed contract response and process-owned events", as
 	});
 });
 
+test("POST /ask answers target list questions without side effects", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const response = await postJson<{ ok: boolean; displayText: string; proposedActions: unknown[]; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_targets",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "what targets are active" },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.match(response.body.displayText, /Visible targets:/);
+		assert.match(response.body.displayText, /π - Power Code/);
+		assert.deepEqual(response.body.proposedActions, []);
+		assert.equal(response.body.events[0]?.kind, "world.observed");
+		assert.deepEqual(mock.sends, []);
+	});
+});
+
+test("POST /ask executes safe open-diff requests directly through the registry", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const response = await postJson<{ ok: boolean; displayText: string; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_open_diff",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "open diff" },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.match(response.body.displayText, /executed successfully/);
+		assert.equal(response.body.events.some((event) => event.kind === "action.executed"), true);
+		assert.equal(mock.openedDiffs.length, 1);
+		assert.deepEqual(mock.sends, []);
+	});
+});
+
+test("POST /ask uses the shared Ask Alfred pipeline and creates PendingAction drafts", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const response = await postJson<{ ok: boolean; pendingAction?: { id: string; actionMetaId: string; status: string }; pendingDraft?: AlfredDraft; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_powerco",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "use my power co session in this workspace and run the focused test" },
+			context: { currentWorkspaceRef: "workspace:9" },
+			policy: { requireConfirmationForSend: true },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.equal(response.body.pendingAction?.actionMetaId, "cmux.sendText");
+		assert.equal(response.body.pendingDraft?.id, response.body.pendingAction?.id);
+		assert.equal(response.body.events[0]?.kind, "draft.created");
+		assert.deepEqual(mock.sends, []);
+	});
+});
+
 test("Powerco named target request creates a pending draft without sending", async () => {
 	await withDaemon(async (baseUrl, token, mock) => {
 		const { status, body } = await createPowercoDraft(baseUrl, token);
@@ -209,10 +272,40 @@ test("Powerco named target request creates a pending draft without sending", asy
 		assert.equal(body.events[0]?.kind, "draft.created");
 		assert.deepEqual(mock.sends, []);
 
+		assert.equal(body.pendingAction?.actionMetaId, "cmux.sendText");
+		assert.equal(body.pendingAction?.id, body.pendingDraft?.id);
+
 		const state = await fetch(`${baseUrl}/state`, { headers: authHeaders(token) });
-		const stateBody = await state.json() as { pendingDrafts: AlfredDraft[] };
+		const stateBody = await state.json() as { pendingActions: Array<{ id: string; actionMetaId: string }>; pendingDrafts: AlfredDraft[] };
+		assert.equal(stateBody.pendingActions.length, 1);
+		assert.equal(stateBody.pendingActions[0]?.id, body.pendingAction?.id);
 		assert.equal(stateBody.pendingDrafts.length, 1);
 		assert.equal(stateBody.pendingDrafts[0]?.id, body.pendingDraft?.id);
+	});
+});
+
+test("/confirm can edit a PendingAction-backed draft before sending", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const draft = (await createPowercoDraft(baseUrl, token)).body.pendingDraft;
+		assert.ok(draft);
+
+		const confirmed = await postJson<{ ok: boolean; events: Array<{ kind: string }> }>(baseUrl, token, "/confirm", {
+			requestId: "req_confirm_edited_powerco",
+			draftId: draft.id,
+			text: "Please run the edited validation command.",
+		});
+
+		assert.equal(confirmed.status, 200);
+		assert.equal(confirmed.body.ok, true);
+		assert.deepEqual(mock.sends.map((send) => send.text), ["Please run the edited validation command."]);
+		assert.equal(confirmed.body.events.some((event) => event.kind === "send.succeeded"), true);
+
+		const state = await fetch(`${baseUrl}/state`, { headers: authHeaders(token) });
+		const stateBody = await state.json() as { pendingActions: unknown[]; pendingDrafts: AlfredDraft[]; events: Array<{ kind: string }> };
+		assert.deepEqual(stateBody.pendingActions, []);
+		assert.deepEqual(stateBody.pendingDrafts, []);
+		assert.equal(stateBody.events.some((event) => event.kind === "action.edited"), true);
+		assert.equal(stateBody.events.some((event) => event.kind === "action.executed"), true);
 	});
 });
 
@@ -779,13 +872,15 @@ test("dashboard renderer includes local operator UI without query-token patterns
 	assert.match(html, /Local authentication/);
 	assert.match(html, /daemon token printed in the terminal/i);
 	assert.match(html, /Daemon health/);
+	assert.match(html, /Ask Alfred/);
 	assert.match(html, /Active loop/);
-	assert.match(html, /Pending drafts/);
+	assert.match(html, /Pending action cards/);
 	assert.match(html, /Visible surfaces and workspaces/);
 	assert.match(html, /Recent activity/);
 	assert.match(html, /Storage warnings/);
 	assert.match(html, /localStorage/);
 	assert.match(html, /x-alfred-auth/);
+	assert.match(html, /api\('\/ask'/);
 	assert.match(html, /api\('\/confirm'/);
 	assert.match(html, /api\('\/cancel'/);
 	assert.equal(html.includes("test-token"), false);
@@ -807,8 +902,9 @@ test("dashboard route renders local UI without exposing daemon state", async () 
 		const html = await dashboard.text();
 		assert.match(html, /Alfred Local Dashboard/);
 		assert.match(html, /\/state/);
+		assert.match(html, /\/ask/);
 		assert.match(html, /\/surfaces/);
-		assert.match(html, /pending drafts/i);
+		assert.match(html, /pending action/i);
 		assert.match(html, /Confirm send/);
 		assert.match(html, /Cancel draft/);
 		assert.match(html, /x-alfred-auth/);
@@ -863,6 +959,7 @@ test("daemon reports structured errors for bad JSON and unavailable cmux", async
 				async readSurface() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async sendTextToSurface() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async sendTextToWorkspace() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
+				async openDiff() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 			},
 		},
 	);

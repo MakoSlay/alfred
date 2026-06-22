@@ -16,6 +16,7 @@ import type {
 	AlfredSource,
 	AlfredTarget,
 	IsoTimestamp,
+	PendingAction,
 	RedactedText,
 	RetentionMetadata,
 } from "../contracts/runtime.ts";
@@ -26,6 +27,7 @@ import { formatHostForUrl } from "../lib/host-formatting.ts";
 import { buildPlannerInput, plannerInputSummary, validatePlannerResult, type AlfredPlanner, type AlfredPlannerIntent, type AlfredPlannerResult } from "../planner/index.ts";
 import { createAlfredLoopManager, type AlfredLoopDecision, type AlfredLoopManager, type AlfredLoopRuntimeState, type AlfredLoopScheduler, type AlfredLoopStartRequest } from "../loops/index.ts";
 import { createJsonFileStorage, defaultAlfredStorageDir, type AlfredStorageAdapter } from "../storage/index.ts";
+import { createActionRegistry, registerBuiltinActions, type ActionRegistry } from "../actions/index.ts";
 
 export interface AlfredDaemonConfig {
 	readonly host: string;
@@ -39,6 +41,7 @@ export interface AlfredDaemonConfig {
 
 export interface AlfredDaemonStateSnapshot {
 	health: "ok" | "degraded";
+	pendingActions: PendingAction[];
 	pendingDrafts: AlfredDraft[];
 	activeLoop: AlfredLoopSummary | null;
 	recentTargets: AlfredTarget[];
@@ -46,7 +49,7 @@ export interface AlfredDaemonStateSnapshot {
 	storageWarnings?: string[];
 }
 
-type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace">;
+type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace" | "openDiff">;
 
 export interface AlfredDaemonDependencies {
 	cmux?: AlfredDaemonCmux;
@@ -66,13 +69,20 @@ export interface AlfredDaemon {
 
 export interface AlfredConfirmRequest {
 	requestId?: string;
+	/** Legacy alias for a pending cmux.sendText action id. */
 	draftId?: string;
+	/** Canonical pending action id. */
+	pendingActionId?: string;
+	/** Optional edited draft text supplied by a pending action card before approval. */
+	text?: string;
 	source?: AlfredSource;
 }
 
 export interface AlfredCancelRequest {
 	requestId?: string;
+	/** Legacy alias for a pending action id. */
 	draftId?: string;
+	pendingActionId?: string;
 	source?: AlfredSource;
 	reason?: string;
 }
@@ -94,7 +104,7 @@ export interface AlfredLoopStopRequest {
 interface DaemonState {
 	recentTargets: AlfredTarget[];
 	events: AlfredEvent[];
-	pendingDrafts: AlfredDraft[];
+	actions: ActionRegistry;
 	storage?: AlfredStorageAdapter;
 	storageWarnings: string[];
 }
@@ -132,9 +142,11 @@ export function createAlfredDaemon(
 ): AlfredDaemon {
 	const resolvedConfig = defaultDaemonConfig(config);
 	const storage = dependencies.storage === null ? undefined : dependencies.storage ?? (resolvedConfig.storageDir ? createJsonFileStorage({ appDir: resolvedConfig.storageDir }) : undefined);
-	const state: DaemonState = { recentTargets: [], events: [], pendingDrafts: [], storage, storageWarnings: [] };
 	const cmux = dependencies.cmux ?? createCmuxWorldModelAdapter();
 	const now = dependencies.now ?? (() => new Date());
+	const actions = createActionRegistry({ now, nextId, defaultTtlMs: DEFAULT_DRAFT_TTL_MS });
+	registerBuiltinActions(actions);
+	const state: DaemonState = { recentTargets: [], events: [], actions, storage, storageWarnings: [] };
 	const planner = dependencies.planner;
 	const loopManager = dependencies.loopManager ?? createAlfredLoopManager({ cmux, now, nextId, decide: dependencies.loopDecider, scheduler: dependencies.loopScheduler });
 	const server = http.createServer((request, response) => {
@@ -210,7 +222,7 @@ async function handleDaemonRequest(
 	pruneExpiredDrafts(state, now().toISOString());
 
 	if (request.method === "GET" && url.pathname === "/state") {
-		writeJson(response, 200, snapshotState(state, loopManager));
+		writeJson(response, 200, snapshotState(state, loopManager, now().toISOString()));
 		return;
 	}
 
@@ -232,7 +244,7 @@ async function handleDaemonRequest(
 		return;
 	}
 
-	if (request.method === "POST" && url.pathname === "/handle") {
+	if (request.method === "POST" && (url.pathname === "/ask" || url.pathname === "/handle")) {
 		const body = await readJsonBody<AlfredHandleRequest>(request, config.maxBodyBytes);
 		if (!body.ok) {
 			writeJson(response, 400, { ok: false, error: { code: "invalid_request", message: body.error, retryable: false } });
@@ -347,6 +359,12 @@ async function handleRequest(
 		return cmuxUnavailableResponse(request.requestId, now().toISOString(), targets.error.message);
 	}
 	rememberTargets(state, targets.value, now().toISOString());
+	if (isTargetListInput(inputText)) {
+		return createTargetsAnswerResponse(request, effectiveSource, targets.value, state, now);
+	}
+	if (isOpenDiffInput(inputText)) {
+		return await executeSafeAction(request, effectiveSource, state, cmux, now, "cmux.openDiff", { unstaged: true });
+	}
 	const draftIntent = resolveDraftIntent(inputText, targets.value, request.context?.currentWorkspaceRef);
 	if (draftIntent) {
 		return createDraftResponse(request, effectiveSource, draftIntent, state, now);
@@ -374,6 +392,84 @@ async function handleRequest(
 		}
 	}
 	return createNoActionResponse(request, effectiveSource, state, now);
+}
+
+function createTargetsAnswerResponse(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	targets: readonly AlfredTarget[],
+	state: DaemonState,
+	now: () => Date,
+): AlfredHandleResponse {
+	const createdAt = now().toISOString();
+	const visible = targets.slice(0, 12);
+	const lines = visible.map((target) => `- ${target.label} (${target.kind}, ${target.ref})${target.current ? " — current" : ""}`);
+	const more = targets.length > visible.length ? `\n…and ${targets.length - visible.length} more.` : "";
+	const displayText = targets.length > 0 ? `Visible targets:\n${lines.join("\n")}${more}` : "No cmux targets are visible right now.";
+	const event = pushEvent(state, {
+		id: nextId("evt"),
+		kind: "world.observed",
+		createdAt,
+		requestId: request.requestId,
+		source: { kind: source.kind, id: source.id, label: source.label },
+		summary: `Listed ${targets.length} visible target${targets.length === 1 ? "" : "s"}.`,
+		data: { targetCount: targets.length },
+		redaction: { status: "not_needed" },
+		retention: defaultEventRetention(createdAt),
+	});
+	return {
+		requestId: request.requestId,
+		createdAt,
+		ok: true,
+		displayText,
+		proposedActions: [],
+		events: [event],
+		nextStatePatch: visible[0] ? { rememberTarget: visible[0] } : undefined,
+	};
+}
+
+async function executeSafeAction(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	state: DaemonState,
+	cmux: AlfredDaemonCmux,
+	now: () => Date,
+	actionId: string,
+	input: Record<string, unknown>,
+	target?: AlfredTarget,
+): Promise<AlfredHandleResponse> {
+	const createdAt = now().toISOString();
+	const proposed = state.actions.propose({ actionId, input, source, target, editable: false });
+	if (!proposed.ok) {
+		const event = recordActionEvent(state, proposed.event);
+		return {
+			requestId: request.requestId,
+			createdAt,
+			ok: false,
+			displayText: proposed.decision.message,
+			proposedActions: [],
+			events: [event],
+			errors: [{ code: proposed.decision.reason === "capability_missing" ? "capability_denied" : "unsupported_action", message: proposed.decision.message, retryable: false }],
+		};
+	}
+	const proposedEvent = recordActionEvent(state, proposed.event);
+	const executed = await state.actions.execute(proposed.pending.id, {
+		source,
+		target,
+		requestId: request.requestId,
+		now,
+		cmux: cmux as never,
+	});
+	const executedEvent = recordActionEvent(state, executed.event);
+	return {
+		requestId: request.requestId,
+		createdAt: executed.event.createdAt,
+		ok: executed.ok,
+		displayText: executed.ok ? executed.event.summary : `Alfred could not execute ${actionId}: ${executed.event.summary}`,
+		proposedActions: [],
+		events: [proposedEvent, executedEvent],
+		errors: executed.ok ? undefined : [{ code: "unsupported_action", message: executed.event.summary, retryable: true }],
+	};
 }
 
 function createNoActionResponse(
@@ -440,29 +536,25 @@ function createDraftResponse(
 	if (!sourceHasCapabilities(source, requiredCapabilities)) {
 		return capabilityDeniedResponse(request.requestId, createdAt, `Source lacks ${requiredCapabilities.join(", ")} capability.`);
 	}
-	const expiresAt = new Date(Date.parse(createdAt) + DEFAULT_DRAFT_TTL_MS).toISOString();
-	const draft: AlfredDraft = {
-		id: nextId("draft"),
+	const proposed = state.actions.propose({
+		actionId: "cmux.sendText",
+		input: { text: intent.message, targetRef: intent.target.ref },
+		source,
 		target: { ...intent.target, confidence: intent.confidence },
-		text: redactedText(intent.message),
-		createdAt,
-		expiresAt,
-		status: "pending",
-		createdBy: source,
-	};
-	state.pendingDrafts.unshift(draft);
-	const action: AlfredAction = {
-		id: nextId("act"),
-		kind: "draft",
-		createdAt,
-		requestedBy: source,
-		target: draft.target,
-		requiredCapabilities,
-		status: "pending_confirmation",
-		draftText: draft.text,
-		confirmBeforeSend: true,
-		expiresAt,
-	};
+		editable: true,
+		ttlMs: DEFAULT_DRAFT_TTL_MS,
+	});
+	if (!proposed.ok) {
+		recordActionEvent(state, proposed.event);
+		return capabilityDeniedResponse(request.requestId, createdAt, proposed.decision.message);
+	}
+	const pending = proposed.pending;
+	const draft = draftFromPendingAction(pending);
+	if (!draft) {
+		return capabilityDeniedResponse(request.requestId, createdAt, "Pending action could not be represented as a draft.");
+	}
+	const action: AlfredAction = draftActionFromPending(pending, source, requiredCapabilities, draft);
+	recordActionEvent(state, proposed.event);
 	const event = pushEvent(state, {
 		id: nextId("evt"),
 		kind: "draft.created",
@@ -470,10 +562,10 @@ function createDraftResponse(
 		requestId: request.requestId,
 		source: { kind: source.kind, id: source.id, label: source.label },
 		target: draft.target,
-		actionId: action.id,
+		actionId: pending.id,
 		summary: `Created draft for ${draft.target.label}.`,
 		redaction: draft.text.redaction,
-		retention: { policy: "session", expiresAt },
+		retention: { policy: "session", expiresAt: pending.expiresAt },
 	});
 	return {
 		requestId: request.requestId,
@@ -482,6 +574,7 @@ function createDraftResponse(
 		speech: source.presentation?.wantsSpeech ? `Shall I send that to ${draft.target.label}, sir?` : undefined,
 		displayText: `Draft ready for ${draft.target.label}. Confirm before sending.`,
 		proposedActions: [action],
+		pendingAction: pending,
 		pendingDraft: draft,
 		events: [event],
 		nextStatePatch: { rememberTarget: draft.target, rememberDraftId: draft.id, rememberLastSpeech: redactedText(`Draft ready for ${draft.target.label}.`) },
@@ -495,9 +588,10 @@ async function confirmDraft(
 	now: () => Date,
 ): Promise<AlfredHandleResponse> {
 	const createdAt = now().toISOString();
-	const draft = findPendingDraft(state, request.draftId);
 	const requestId = request.requestId ?? nextId("req_confirm");
-	if (!draft) {
+	const pending = findPendingSendAction(state, request.pendingActionId ?? request.draftId);
+	const draft = pending ? draftFromPendingAction(pending) : null;
+	if (!pending || !draft) {
 		return {
 			requestId,
 			createdAt,
@@ -509,32 +603,37 @@ async function confirmDraft(
 		};
 	}
 	if (draft.expiresAt <= createdAt) {
-		draft.status = "expired";
-		removePendingDraft(state, draft.id);
+		pending.status = "expired";
+		const expiredEvent = pushEvent(state, {
+			id: nextId("evt"),
+			kind: "action.expired",
+			createdAt,
+			requestId,
+			target: draft.target,
+			actionId: pending.id,
+			summary: `Pending action ${pending.label} has expired.`,
+			redaction: draft.text.redaction,
+			retention: { policy: "session" },
+		});
 		return {
 			requestId,
 			createdAt,
 			ok: false,
 			displayText: "That draft has expired.",
 			proposedActions: [],
-			events: [],
+			events: [expiredEvent],
 			errors: [{ code: "confirmation_expired", message: "Draft confirmation expired.", retryable: false }],
 		};
 	}
-	const source = request.source ?? draft.createdBy;
-	const requiredCapabilities = requiredSendCapabilities(draft.target);
-	if (!sourceHasCapabilities(source, requiredCapabilities)) {
-		return capabilityDeniedResponse(requestId, createdAt, `Source lacks ${requiredCapabilities.join(", ")} capability.`);
-	}
+	const source = request.source ?? pending.proposedBy;
 	const targets = await cmux.listTargets();
 	if (!targets.ok) {
 		return cmuxUnavailableResponse(requestId, createdAt, targets.error.message);
 	}
 	rememberTargets(state, targets.value, now().toISOString());
-	const liveTarget = targets.value.find((target) => target.ref === draft.target.ref || (draft.target.surfaceRef && target.surfaceRef === draft.target.surfaceRef));
+	const liveTarget = findLiveTarget(targets.value, draft.target);
 	if (!liveTarget) {
-		draft.status = "failed";
-		removePendingDraft(state, draft.id);
+		pending.status = "failed";
 		const failedEvent = pushSendFailedEvent(state, requestId, createdAt, source, draft, "Target disappeared before confirmation.");
 		return {
 			requestId,
@@ -546,6 +645,40 @@ async function confirmDraft(
 			errors: [{ code: "target_not_found", message: "Target disappeared before confirmation.", retryable: true }],
 		};
 	}
+	let draftToSend = draft;
+	if (request.text !== undefined) {
+		const editedText = request.text.trim();
+		if (!editedText) {
+			return invalidRequestResponse(requestId, createdAt, "Edited draft text must be non-empty.");
+		}
+		const edited = state.actions.updateInput(pending.id, { text: editedText, targetRef: liveTarget.ref }, source, liveTarget);
+		if (edited.event) recordActionEvent(state, edited.event);
+		if (!edited.ok || !edited.pending) {
+			return capabilityDeniedResponse(requestId, createdAt, edited.decision?.message ?? "Pending action could not be edited.");
+		}
+		draftToSend = draftFromPendingAction(edited.pending) ?? draftToSend;
+	}
+	const requiredCapabilities = requiredSendCapabilities(liveTarget);
+	if (!sourceHasCapabilities(source, requiredCapabilities)) {
+		return capabilityDeniedResponse(requestId, createdAt, `Source lacks ${requiredCapabilities.join(", ")} capability.`);
+	}
+	if (!targetHasCapabilities(liveTarget, requiredCapabilities)) {
+		return capabilityDeniedResponse(requestId, createdAt, `Target ${liveTarget.label} does not support ${requiredCapabilities.join(", ")}.`);
+	}
+	const approved = state.actions.approve(pending.id, source, liveTarget);
+	if (approved.event) recordActionEvent(state, approved.event);
+	if (!approved.ok || !approved.pending) {
+		const code = approved.pending?.status === "expired" ? "confirmation_expired" : "capability_denied";
+		return {
+			requestId,
+			createdAt,
+			ok: false,
+			displayText: approved.event?.summary ?? "Pending action could not be approved.",
+			proposedActions: [],
+			events: approved.event ? [approved.event] : [],
+			errors: [{ code, message: approved.event?.summary ?? "Pending action could not be approved.", retryable: false }],
+		};
+	}
 	const confirmedEvent = pushEvent(state, {
 		id: nextId("evt"),
 		kind: "draft.confirmed",
@@ -553,11 +686,11 @@ async function confirmDraft(
 		requestId,
 		source: { kind: source.kind, id: source.id, label: source.label },
 		target: liveTarget,
+		actionId: pending.id,
 		summary: `Confirmed draft for ${liveTarget.label}.`,
-		redaction: draft.text.redaction,
-		retention: { policy: "session", expiresAt: draft.expiresAt },
+		redaction: draftToSend.text.redaction,
+		retention: { policy: "session", expiresAt: draftToSend.expiresAt },
 	});
-	draft.status = "confirmed";
 	pushEvent(state, {
 		id: nextId("evt"),
 		kind: "send.started",
@@ -565,27 +698,31 @@ async function confirmDraft(
 		requestId,
 		source: { kind: source.kind, id: source.id, label: source.label },
 		target: liveTarget,
+		actionId: pending.id,
 		summary: `Started send to ${liveTarget.label}.`,
-		redaction: draft.text.redaction,
+		redaction: draftToSend.text.redaction,
 		retention: defaultEventRetention(createdAt),
 	});
-	const sendResult = await sendDraft(cmux, liveTarget, draft.text.value);
-	if (!sendResult.ok) {
-		draft.status = "failed";
-		removePendingDraft(state, draft.id);
-		const failedEvent = pushSendFailedEvent(state, requestId, now().toISOString(), source, draft, sendResult.error.message, liveTarget);
+	const executed = await state.actions.execute(pending.id, {
+		source,
+		target: liveTarget,
+		requestId,
+		now,
+		cmux: cmux as never,
+	});
+	recordActionEvent(state, executed.event);
+	if (!executed.ok) {
+		const failedEvent = pushSendFailedEvent(state, requestId, now().toISOString(), source, draftToSend, executed.event.summary, liveTarget);
 		return {
 			requestId,
 			createdAt: failedEvent.createdAt,
 			ok: false,
-			displayText: `I could not send that to ${liveTarget.label}. ${sendResult.error.message}`,
-			proposedActions: [sendAction(draft, source, failedEvent.createdAt, "failed", sendResult.error.message, liveTarget)],
+			displayText: `I could not send that to ${liveTarget.label}. ${executed.event.summary}`,
+			proposedActions: [sendAction(draftToSend, source, failedEvent.createdAt, "failed", executed.event.summary, liveTarget)],
 			events: [confirmedEvent, failedEvent],
-			errors: [{ code: "send_failed", message: sendResult.error.message, retryable: true }],
+			errors: [{ code: "send_failed", message: executed.event.summary, retryable: true }],
 		};
 	}
-	draft.status = "sent";
-	removePendingDraft(state, draft.id);
 	const sentAt = now().toISOString();
 	const succeededEvent = pushEvent(state, {
 		id: nextId("evt"),
@@ -594,8 +731,9 @@ async function confirmDraft(
 		requestId,
 		source: { kind: source.kind, id: source.id, label: source.label },
 		target: liveTarget,
+		actionId: pending.id,
 		summary: `Sent draft to ${liveTarget.label}.`,
-		redaction: draft.text.redaction,
+		redaction: draftToSend.text.redaction,
 		retention: { policy: "short", expiresAt: new Date(Date.parse(sentAt) + 24 * 60 * 60 * 1000).toISOString(), reason: "send audit event" },
 	});
 	return {
@@ -604,17 +742,18 @@ async function confirmDraft(
 		ok: true,
 		speech: source.presentation?.wantsSpeech ? `I have sent that to ${liveTarget.label}, sir.` : undefined,
 		displayText: `Sent draft to ${liveTarget.label}.`,
-		proposedActions: [sendAction(draft, source, sentAt, "succeeded", undefined, liveTarget)],
+		proposedActions: [sendAction(draftToSend, source, sentAt, "succeeded", undefined, liveTarget)],
 		events: [confirmedEvent, succeededEvent],
-		nextStatePatch: { rememberTarget: liveTarget, rememberDraftId: null, rememberLastSentText: draft.text },
+		nextStatePatch: { rememberTarget: liveTarget, rememberDraftId: null, rememberLastSentText: draftToSend.text },
 	};
 }
 
 function cancelDraft(request: AlfredCancelRequest, state: DaemonState, now: () => Date): AlfredHandleResponse {
 	const createdAt = now().toISOString();
 	const requestId = request.requestId ?? nextId("req_cancel");
-	const draft = findPendingDraft(state, request.draftId);
-	if (!draft) {
+	const pending = findPendingSendAction(state, request.pendingActionId ?? request.draftId);
+	const draft = pending ? draftFromPendingAction(pending) : null;
+	if (!pending || !draft) {
 		return {
 			requestId,
 			createdAt,
@@ -625,9 +764,20 @@ function cancelDraft(request: AlfredCancelRequest, state: DaemonState, now: () =
 			errors: [{ code: "confirmation_expired", message: "No pending draft was found.", retryable: false }],
 		};
 	}
-	draft.status = "cancelled";
-	removePendingDraft(state, draft.id);
 	const source = request.source ?? draft.createdBy;
+	const cancelled = state.actions.cancel(pending.id, request.reason);
+	if (cancelled.event) recordActionEvent(state, cancelled.event);
+	if (!cancelled.ok) {
+		return {
+			requestId,
+			createdAt,
+			ok: false,
+			displayText: "That pending action can no longer be cancelled.",
+			proposedActions: [],
+			events: cancelled.event ? [cancelled.event] : [],
+			errors: [{ code: "confirmation_expired", message: "Pending action is no longer cancellable.", retryable: false }],
+		};
+	}
 	const event = pushEvent(state, {
 		id: nextId("evt"),
 		kind: "draft.cancelled",
@@ -635,6 +785,7 @@ function cancelDraft(request: AlfredCancelRequest, state: DaemonState, now: () =
 		requestId,
 		source: { kind: source.kind, id: source.id, label: source.label },
 		target: draft.target,
+		actionId: pending.id,
 		summary: `Cancelled draft for ${draft.target.label}.`,
 		redaction: draft.text.redaction,
 		retention: defaultEventRetention(createdAt),
@@ -898,6 +1049,10 @@ function recordResponseEvents(state: DaemonState, events: readonly AlfredEvent[]
 	}
 }
 
+function recordActionEvent(state: DaemonState, event: AlfredEvent): AlfredEvent {
+	return pushEvent(state, event);
+}
+
 function resolvePlannerDraftIntent(intent: Extract<AlfredPlannerIntent, { kind: "draft_message" }>, targets: AlfredTarget[], currentWorkspaceRef?: AlfredRef): PlannerDraftResolution {
 	const refMatches = intent.targetRef ? targetRefMatches(targets, intent.targetRef) : [];
 	if (intent.targetRef && refMatches.length !== 1) {
@@ -1019,6 +1174,15 @@ function normalizeForMatch(value: string): string {
 	return value.toLowerCase().replace(/^π\s*-\s*/i, "").replace(/[-_\s]+/g, " ").replace(/[^a-z0-9 ]+/g, "").replace(/\s+/g, " ").trim();
 }
 
+function isTargetListInput(inputText: string): boolean {
+	return /^(?:what\s+)?(?:targets|surfaces|workspaces)(?:\s+are\s+(?:active|visible|available))?\??$/i.test(inputText.trim())
+		|| /^(?:what|which)\s+(?:targets|surfaces|workspaces)\s+(?:are\s+)?(?:active|visible|available)\??$/i.test(inputText.trim());
+}
+
+function isOpenDiffInput(inputText: string): boolean {
+	return /^(?:open|show)\s+(?:the\s+)?(?:diff|changes)(?:\s+view)?$/i.test(inputText.trim());
+}
+
 function isConfirmInput(inputText: string): boolean {
 	return /^(yes|send that|confirm|go ahead|do it)$/i.test(inputText.trim());
 }
@@ -1092,23 +1256,62 @@ function pushSendFailedEvent(
 	});
 }
 
-function findPendingDraft(state: DaemonState, draftId?: string): AlfredDraft | undefined {
-	return draftId
-		? state.pendingDrafts.find((draft) => draft.id === draftId && draft.status === "pending")
-		: state.pendingDrafts.find((draft) => draft.status === "pending");
+function findPendingSendAction(state: DaemonState, pendingActionId?: string): PendingAction | undefined {
+	const candidates = state.actions.listPending().filter((pending) => pending.actionMetaId === "cmux.sendText" && pending.status === "pending");
+	return pendingActionId ? candidates.find((pending) => pending.id === pendingActionId) : candidates[0];
 }
 
-function removePendingDraft(state: DaemonState, draftId: string): void {
-	state.pendingDrafts = state.pendingDrafts.filter((draft) => draft.id !== draftId);
+function findLiveTarget(targets: readonly AlfredTarget[], target: AlfredTarget): AlfredTarget | undefined {
+	return targets.find((candidate) => candidate.ref === target.ref || (target.surfaceRef !== undefined && candidate.surfaceRef === target.surfaceRef));
 }
 
-function pruneExpiredDrafts(state: DaemonState, nowIso: IsoTimestamp): void {
-	for (const draft of state.pendingDrafts) {
-		if (draft.status === "pending" && draft.expiresAt <= nowIso) {
-			draft.status = "expired";
-		}
-	}
-	state.pendingDrafts = state.pendingDrafts.filter((draft) => draft.status === "pending");
+function pendingDrafts(state: DaemonState, nowIso?: IsoTimestamp): AlfredDraft[] {
+	return state.actions.listPending()
+		.filter((pending) => pending.actionMetaId === "cmux.sendText" && pending.status === "pending" && (!nowIso || pending.expiresAt > nowIso))
+		.map((pending) => draftFromPendingAction(pending))
+		.filter((draft): draft is AlfredDraft => draft !== null);
+}
+
+function pendingActions(state: DaemonState, nowIso?: IsoTimestamp): PendingAction[] {
+	return state.actions.listPending().filter((pending) => !nowIso || pending.expiresAt > nowIso);
+}
+
+function draftFromPendingAction(pending: PendingAction): AlfredDraft | null {
+	if (pending.actionMetaId !== "cmux.sendText" || !pending.target || typeof pending.input.text !== "string") return null;
+	const status: AlfredDraft["status"] = pending.status === "executed" ? "sent"
+		: pending.status === "cancelled" ? "cancelled"
+		: pending.status === "expired" ? "expired"
+		: pending.status === "failed" || pending.status === "denied" ? "failed"
+		: "pending";
+	return {
+		id: pending.id,
+		target: pending.target,
+		text: redactedText(pending.input.text),
+		createdAt: pending.createdAt,
+		expiresAt: pending.expiresAt,
+		status,
+		createdBy: pending.proposedBy,
+	};
+}
+
+function draftActionFromPending(pending: PendingAction, source: AlfredSource, requiredCapabilities: AlfredCapability[], draft: AlfredDraft): AlfredAction {
+	return {
+		id: pending.id,
+		kind: "draft",
+		createdAt: pending.createdAt,
+		requestedBy: source,
+		target: draft.target,
+		requiredCapabilities,
+		status: "pending_confirmation",
+		draftText: draft.text,
+		confirmBeforeSend: true,
+		expiresAt: pending.expiresAt,
+	};
+}
+
+function pruneExpiredDrafts(_state: DaemonState, _nowIso: IsoTimestamp): void {
+	// PendingAction is now the canonical approval model. Expiry is revalidated by
+	// approval/execution and compatibility draft lists derive only non-expired records.
 }
 
 function pushEvent(state: DaemonState, event: AlfredEvent): AlfredEvent {
@@ -1264,10 +1467,11 @@ function writeHtml(response: ServerResponse, html: string): void {
 }
 
 
-function snapshotState(state: DaemonState, loopManager?: AlfredLoopManager): AlfredDaemonStateSnapshot {
+function snapshotState(state: DaemonState, loopManager?: AlfredLoopManager, nowIso: IsoTimestamp = new Date().toISOString()): AlfredDaemonStateSnapshot {
 	return {
 		health: state.storageWarnings.length > 0 ? "degraded" : "ok",
-		pendingDrafts: state.pendingDrafts,
+		pendingActions: pendingActions(state, nowIso),
+		pendingDrafts: pendingDrafts(state, nowIso),
 		activeLoop: loopManager?.status() ?? null,
 		recentTargets: state.recentTargets,
 		events: state.events,
