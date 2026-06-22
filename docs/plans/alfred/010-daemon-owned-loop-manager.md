@@ -124,7 +124,7 @@ Manual smoke after daemon loop support exists:
 - Loop `draft_reply` decisions create pending drafts unless the original loop source has the distinct `loop.autonomousSend` capability. `loop.manage` alone can start/stop/status/poll but does not permit direct sends.
 - Autonomous loop replies require both the target send capability (`surface.send` or `workspace.send`) and `loop.autonomousSend`; send failures return `send_failed` and do not claim success.
 - Pi extension behavior was not changed in this task.
-- Review hardening added structured invalid-request handling for malformed loop starts, fail-closed handling for loop decision-provider exceptions, and manager-level `loop.manage` enforcement for direct stop callers.
+- Review hardening added structured invalid-request handling for malformed loop starts, fail-closed handling for loop decision-provider exceptions, manager-level `loop.manage` enforcement for direct stop callers, defensive loop-state copies, malformed-decision normalization, non-zombie reply failure state, and explicit source/capability requirements for daemon poll/stop controls.
 
 ## Task 013 Pi Bridge Migration Outline
 
@@ -136,9 +136,9 @@ Manual smoke after daemon loop support exists:
 
 ## Validation Evidence
 
-- 2026-06-22: `npm run check` — passed (54 tests).
+- 2026-06-22: `npm run check` — passed (59 tests).
 - 2026-06-22: `npm run typecheck` — passed.
-- 2026-06-22: `npm test` — passed (54 tests).
+- 2026-06-22: `npm test` — passed (59 tests).
 
 ## Blockers
 

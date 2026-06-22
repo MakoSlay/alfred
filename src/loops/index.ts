@@ -59,6 +59,7 @@ export interface AlfredLoopManager {
 	status(loopId?: AlfredId): AlfredLoopSummary | null;
 	active(): AlfredLoopRuntimeState | null;
 	recordReplyDrafted(loopId: AlfredId): void;
+	recordReplyFailed(loopId: AlfredId, status?: "failed" | "needs_user"): void;
 }
 
 export type AlfredLoopCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface">;
@@ -205,7 +206,8 @@ export function createAlfredLoopManager(dependencies: AlfredLoopManagerDependenc
 		const transcript = await readTargetTranscript(dependencies.cmux, targetResult.value);
 		let decision: AlfredLoopDecision;
 		try {
-			decision = dependencies.decide ? await dependencies.decide(loop, transcript) : { kind: "wait", reason: "No loop decision provider is configured yet." };
+			const rawDecision = dependencies.decide ? await dependencies.decide(cloneRuntimeState(loop), transcript) : { kind: "wait", reason: "No loop decision provider is configured yet." };
+			decision = normalizeLoopDecision(rawDecision);
 		} catch {
 			loop.summary.status = "needs_user";
 			loop.summary.lastActivityAt = now().toISOString();
@@ -214,7 +216,7 @@ export function createAlfredLoopManager(dependencies: AlfredLoopManagerDependenc
 			loop.lastDecision = decision;
 			return decision;
 		}
-		loop.lastDecision = normalizeLoopDecision(decision);
+		loop.lastDecision = decision;
 		loop.summary.lastActivityAt = now().toISOString();
 		if (loop.lastDecision.kind === "wait") {
 			loop.summary.status = "waiting";
@@ -291,18 +293,25 @@ export function createAlfredLoopManager(dependencies: AlfredLoopManagerDependenc
 
 	function active(): AlfredLoopRuntimeState | null {
 		if (!activeLoop) return null;
-		return activeLoop;
+		return cloneRuntimeState(activeLoop);
 	}
 
 	function recordReplyDrafted(loopId: AlfredId): void {
-		if (!activeLoop || activeLoop.summary.id !== loopId) return;
+		if (!activeLoop || activeLoop.summary.id !== loopId || activeLoop.summary.status !== "waiting") return;
 		activeLoop.summary.turns += 1;
 		activeLoop.summary.status = "waiting";
 		activeLoop.summary.lastActivityAt = now().toISOString();
 		scheduler.schedule(loopId, activeLoop.pollIntervalMs);
 	}
 
-	return { start, poll, stop, status, active, recordReplyDrafted };
+	function recordReplyFailed(loopId: AlfredId, status: "failed" | "needs_user" = "failed"): void {
+		if (!activeLoop || activeLoop.summary.id !== loopId) return;
+		activeLoop.summary.status = status;
+		activeLoop.summary.lastActivityAt = now().toISOString();
+		scheduler.cancel(loopId);
+	}
+
+	return { start, poll, stop, status, active, recordReplyDrafted, recordReplyFailed };
 }
 
 async function findTarget(cmux: AlfredLoopCmux, targetRef: AlfredRef): Promise<CmuxResult<AlfredTarget>> {
@@ -346,14 +355,27 @@ function isRedactedTextLike(value: unknown): value is RedactedText {
 	return typeof text.value === "string" && Boolean(text.redaction) && typeof text.redaction === "object";
 }
 
-function normalizeLoopDecision(decision: AlfredLoopDecision): AlfredLoopDecision {
-	if (decision.kind === "draft_reply") {
-		const message = decision.message.trim();
+function normalizeLoopDecision(decision: unknown): AlfredLoopDecision {
+	if (!decision || typeof decision !== "object") {
+		return { kind: "needs_user", summary: "Loop decision provider returned an invalid decision." };
+	}
+	const record = decision as Record<string, unknown>;
+	if (record.kind === "draft_reply") {
+		const message = typeof record.message === "string" ? record.message.trim() : "";
 		return message ? { kind: "draft_reply", message } : { kind: "needs_user", summary: "Loop planner returned an empty reply." };
 	}
-	if (decision.kind === "done") return { kind: "done", summary: decision.summary.trim() || "Loop completed." };
-	if (decision.kind === "needs_user") return { kind: "needs_user", summary: decision.summary.trim() || "Loop needs user input." };
-	return { kind: "wait", reason: decision.reason?.trim() };
+	if (record.kind === "done") {
+		const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+		return { kind: "done", summary: summary || "Loop completed." };
+	}
+	if (record.kind === "needs_user") {
+		const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+		return { kind: "needs_user", summary: summary || "Loop needs user input." };
+	}
+	if (record.kind === "wait") {
+		return { kind: "wait", reason: typeof record.reason === "string" ? record.reason.trim() : undefined };
+	}
+	return { kind: "needs_user", summary: "Loop decision provider returned an invalid decision." };
 }
 
 function applyAllowedCapabilities(source: AlfredSource, allowedCapabilities?: readonly AlfredCapability[]): AlfredSource {
@@ -376,8 +398,37 @@ function errorResponse(requestId: string, createdAt: IsoTimestamp, displayText: 
 	};
 }
 
+function cloneRuntimeState(state: AlfredLoopRuntimeState): AlfredLoopRuntimeState {
+	return {
+		summary: cloneSummary(state.summary),
+		source: cloneSource(state.source),
+		allowedCapabilities: [...state.allowedCapabilities],
+		pollIntervalMs: state.pollIntervalMs,
+		lastDecision: state.lastDecision ? cloneDecision(state.lastDecision) : undefined,
+	};
+}
+
 function cloneSummary(summary: AlfredLoopSummary): AlfredLoopSummary {
-	return { ...summary, target: { ...summary.target }, goal: { ...summary.goal, redaction: { ...summary.goal.redaction } } };
+	return {
+		...summary,
+		target: { ...summary.target, metadata: summary.target.metadata ? { ...summary.target.metadata } : undefined, capabilities: [...summary.target.capabilities] },
+		goal: { ...summary.goal, redaction: { ...summary.goal.redaction, rulesApplied: summary.goal.redaction.rulesApplied ? [...summary.goal.redaction.rulesApplied] : undefined } },
+	};
+}
+
+function cloneSource(source: AlfredSource): AlfredSource {
+	return {
+		...source,
+		capabilities: [...source.capabilities],
+		presentation: source.presentation ? { ...source.presentation } : undefined,
+	};
+}
+
+function cloneDecision(decision: AlfredLoopDecision): AlfredLoopDecision {
+	if (decision.kind === "draft_reply") return { kind: "draft_reply", message: decision.message };
+	if (decision.kind === "done") return { kind: "done", summary: decision.summary };
+	if (decision.kind === "needs_user") return { kind: "needs_user", summary: decision.summary };
+	return { kind: "wait", reason: decision.reason };
 }
 
 function clampInt(value: number, min: number, max: number): number {

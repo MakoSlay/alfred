@@ -419,6 +419,33 @@ test("loop poll drafts replies when autonomous-send approval is absent", async (
 	});
 });
 
+test("loop draft failure marks loop as needing user", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const source = piCommandSource({ capabilities: ["world.read", "surface.read", "loop.manage"] });
+		const started = await postJson<{ activeLoop?: { id: string } }>(baseUrl, token, "/loops/start", {
+			requestId: "req_loop_start_draft_failure",
+			source,
+			targetRef: "surface:42",
+			goal: { value: "Ask for cleanup advice.", redaction: { status: "not_needed" } },
+			maxTurns: 4,
+			pollIntervalMs: 3_000,
+			allowedCapabilities: source.capabilities,
+		});
+		const polled = await postJson<{ ok: boolean; errors: Array<{ code: string }>; activeLoop?: { status: string }; pendingDraft?: AlfredDraft }>(baseUrl, token, "/loops/poll", {
+			requestId: "req_loop_poll_draft_failure",
+			loopId: started.body.activeLoop?.id,
+			source,
+		});
+
+		assert.equal(polled.status, 400);
+		assert.equal(polled.body.ok, false);
+		assert.equal(polled.body.errors[0]?.code, "capability_denied");
+		assert.equal(polled.body.pendingDraft, undefined);
+		assert.equal(polled.body.activeLoop?.status, "needs_user");
+		assert.deepEqual(mock.sends, []);
+	}, { loopDecider: async () => ({ kind: "draft_reply", message: "Please list the files I can delete now." }) });
+});
+
 test("loop poll can autonomously send only with loop.autonomousSend", async () => {
 	await withDaemon(async (baseUrl, token, mock) => {
 		const source = piCommandSource({ capabilities: [...piCommandSource().capabilities, "loop.autonomousSend"] });
@@ -470,7 +497,7 @@ test("autonomous loop send failures do not claim success", async () => {
 			pollIntervalMs: 3_000,
 			allowedCapabilities: source.capabilities,
 		});
-		const polled = await postJson<{ ok: boolean; errors: Array<{ code: string }>; proposedActions: Array<{ status: string }>; events: Array<{ kind: string }> }>(baseUrl, startedDaemon.authToken, "/loops/poll", {
+		const polled = await postJson<{ ok: boolean; errors: Array<{ code: string }>; proposedActions: Array<{ status: string }>; activeLoop?: { status: string }; events: Array<{ kind: string }> }>(baseUrl, startedDaemon.authToken, "/loops/poll", {
 			requestId: "req_loop_poll_send_failure",
 			loopId: started.body.activeLoop?.id,
 			source,
@@ -480,11 +507,70 @@ test("autonomous loop send failures do not claim success", async () => {
 		assert.equal(polled.body.ok, false);
 		assert.equal(polled.body.errors[0]?.code, "send_failed");
 		assert.equal(polled.body.proposedActions[0]?.status, "failed");
+		assert.equal(polled.body.activeLoop?.status, "failed");
 		assert.equal(polled.body.events.some((event) => event.kind === "send.succeeded"), false);
 		assert.equal(mock.sends.length, 1);
+
+		const status = await fetch(`${baseUrl}/loops/status?loopId=${started.body.activeLoop?.id ?? ""}`, { headers: authHeaders(startedDaemon.authToken) });
+		const statusBody = await status.json() as { activeLoop?: { status: string } };
+		assert.equal(statusBody.activeLoop?.status, "failed");
 	} finally {
 		await daemon.stop();
 	}
+});
+
+test("loop poll and stop require a source with loop.manage", async () => {
+	await withDaemon(async (baseUrl, token) => {
+		const source = piCommandSource();
+		const started = await postJson<{ activeLoop?: { id: string } }>(baseUrl, token, "/loops/start", {
+			requestId: "req_loop_start_control_source",
+			source,
+			targetRef: "surface:42",
+			goal: { value: "Do work.", redaction: { status: "not_needed" } },
+			maxTurns: 4,
+			pollIntervalMs: 3_000,
+			allowedCapabilities: source.capabilities,
+		});
+		assert.ok(started.body.activeLoop?.id);
+
+		const pollWithoutSource = await postJson<{ ok: boolean; errors: Array<{ code: string }> }>(baseUrl, token, "/loops/poll", {
+			requestId: "req_loop_poll_without_source",
+			loopId: started.body.activeLoop.id,
+		});
+		assert.equal(pollWithoutSource.status, 400);
+		assert.equal(pollWithoutSource.body.ok, false);
+		assert.equal(pollWithoutSource.body.errors[0]?.code, "invalid_request");
+
+		const stopWithoutSource = await postJson<{ ok: boolean; errors: Array<{ code: string }> }>(baseUrl, token, "/loops/stop", {
+			requestId: "req_loop_stop_without_source",
+			loopId: started.body.activeLoop.id,
+		});
+		assert.equal(stopWithoutSource.status, 400);
+		assert.equal(stopWithoutSource.body.ok, false);
+		assert.equal(stopWithoutSource.body.errors[0]?.code, "invalid_request");
+
+		const pollWithoutCapability = await postJson<{ ok: boolean; errors: Array<{ code: string }> }>(baseUrl, token, "/loops/poll", {
+			requestId: "req_loop_poll_without_capability",
+			loopId: started.body.activeLoop.id,
+			source: cliSource(),
+		});
+		assert.equal(pollWithoutCapability.status, 400);
+		assert.equal(pollWithoutCapability.body.ok, false);
+		assert.equal(pollWithoutCapability.body.errors[0]?.code, "capability_denied");
+
+		const stopWithoutCapability = await postJson<{ ok: boolean; errors: Array<{ code: string }> }>(baseUrl, token, "/loops/stop", {
+			requestId: "req_loop_stop_without_capability",
+			loopId: started.body.activeLoop.id,
+			source: cliSource(),
+		});
+		assert.equal(stopWithoutCapability.status, 400);
+		assert.equal(stopWithoutCapability.body.ok, false);
+		assert.equal(stopWithoutCapability.body.errors[0]?.code, "capability_denied");
+
+		const status = await fetch(`${baseUrl}/loops/status?loopId=${started.body.activeLoop.id}`, { headers: authHeaders(token) });
+		const statusBody = await status.json() as { activeLoop?: { status: string } };
+		assert.equal(statusBody.activeLoop?.status, "running");
+	});
 });
 
 test("loop start rejects malformed authenticated bodies with structured errors", async () => {

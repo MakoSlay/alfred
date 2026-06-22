@@ -667,14 +667,17 @@ async function pollLoop(
 	loopManager?: AlfredLoopManager,
 ): Promise<AlfredHandleResponse> {
 	const createdAt = now().toISOString();
+	const requestId = request.requestId ?? nextId("req_loop_poll");
+	if (!request.source || !Array.isArray(request.source.capabilities)) {
+		return invalidLoopControlSourceResponse(requestId, createdAt);
+	}
+	if (!sourceHasCapabilities(request.source, ["loop.manage"])) {
+		return capabilityDeniedResponse(requestId, createdAt, "Missing loop.manage capability");
+	}
 	const active = loopManager?.active();
 	const loopId = request.loopId ?? active?.summary.id;
-	const requestId = request.requestId ?? nextId("req_loop_poll");
 	if (!loopManager || !loopId || !active || active.summary.id !== loopId) {
 		return loopErrorResponse(requestId, createdAt, "There is no active loop to poll.", { code: "loop_not_found", message: "Loop not found.", retryable: false });
-	}
-	if (request.source && !sourceHasCapabilities(request.source, ["loop.manage"])) {
-		return capabilityDeniedResponse(requestId, createdAt, "Missing loop.manage capability");
 	}
 	const decision = await loopManager.poll(loopId);
 	if (decision.kind === "draft_reply") {
@@ -726,7 +729,8 @@ async function handleLoopDraftReply(
 				nextStatePatch: { ...draftResponse.nextStatePatch, activeLoopId: active.summary.id },
 			};
 		}
-		return draftResponse;
+		loopManager.recordReplyFailed(active.summary.id, "needs_user");
+		return { ...draftResponse, activeLoop: loopManager.status(active.summary.id) ?? undefined, nextStatePatch: { ...draftResponse.nextStatePatch, activeLoopId: active.summary.id } };
 	}
 	return await sendAutonomousLoopReply(requestId, decision.message, state, cmux, now, loopManager, active);
 }
@@ -768,6 +772,7 @@ async function sendAutonomousLoopReply(
 	const sendResult = await sendDraft(cmux, active.summary.target, message);
 	if (!sendResult.ok) {
 		const failedAt = now().toISOString();
+		loopManager.recordReplyFailed(active.summary.id, "failed");
 		const failedEvent = pushSendFailedEvent(state, requestId, failedAt, active.source, draft, sendResult.error.message, active.summary.target);
 		return {
 			requestId,
@@ -813,14 +818,17 @@ async function stopLoop(
 	loopManager?: AlfredLoopManager,
 ): Promise<AlfredHandleResponse> {
 	const createdAt = now().toISOString();
+	const requestId = request.requestId ?? nextId("req_loop_stop");
+	if (!request.source || !Array.isArray(request.source.capabilities)) {
+		return invalidLoopControlSourceResponse(requestId, createdAt);
+	}
+	if (!sourceHasCapabilities(request.source, ["loop.manage"])) {
+		return capabilityDeniedResponse(requestId, createdAt, "Missing loop.manage capability");
+	}
 	const active = loopManager?.active();
 	const loopId = request.loopId ?? active?.summary.id;
-	const requestId = request.requestId ?? nextId("req_loop_stop");
 	if (!loopManager || !loopId) {
 		return loopErrorResponse(requestId, createdAt, "There is no active loop to stop.", { code: "loop_not_found", message: "Loop not found.", retryable: false });
-	}
-	if (request.source && !sourceHasCapabilities(request.source, ["loop.manage"])) {
-		return capabilityDeniedResponse(requestId, createdAt, "Missing loop.manage capability");
 	}
 	const result = await loopManager.stop(loopId, { requestId, source: request.source, interruptTarget: request.interruptTarget, reason: request.reason });
 	recordResponseEvents(state, result.events);
@@ -864,6 +872,10 @@ function loopDecisionDisplayText(decision: AlfredLoopDecision, targetLabel: stri
 
 function loopErrorResponse(requestId: AlfredId, createdAt: IsoTimestamp, displayText: string, error: AlfredError): AlfredHandleResponse {
 	return { requestId, createdAt, ok: false, displayText, proposedActions: [], events: [], errors: [error] };
+}
+
+function invalidLoopControlSourceResponse(requestId: AlfredId, createdAt: IsoTimestamp): AlfredHandleResponse {
+	return loopErrorResponse(requestId, createdAt, "Loop control requires a source with loop.manage capability.", { code: "invalid_request", message: "Loop control requires a source with loop.manage capability.", retryable: false });
 }
 
 function unsupportedLoopResponse(requestId: AlfredId, createdAt: IsoTimestamp): AlfredHandleResponse {
