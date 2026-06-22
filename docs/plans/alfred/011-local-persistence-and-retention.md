@@ -43,13 +43,13 @@ Use this default unless implementation evidence shows it is unsafe:
 
 ## Checklist
 
-- [ ] Write a short storage decision note comparing JSONL, SQLite, and app-dir layout for Alfred's current needs, starting from the app-dir JSONL default above.
-- [ ] Define retention/redaction rules for events, target memory, loop state, pending drafts, and transcript-like data.
-- [ ] Implement the selected storage adapter behind a daemon-owned interface.
-- [ ] Persist only approved fields and avoid raw secrets/transcripts unless explicitly redacted and justified.
-- [ ] Load persisted state on daemon startup and prune expired records.
-- [ ] Add tests for persistence round trip, retention pruning, redaction behavior, and corrupt-store handling.
-- [ ] Document backup/delete/reset procedures for local operators.
+- [x] Write a short storage decision note comparing JSONL, SQLite, and app-dir layout for Alfred's current needs, starting from the app-dir JSONL default above.
+- [x] Define retention/redaction rules for events, target memory, loop state, pending drafts, and transcript-like data.
+- [x] Implement the selected storage adapter behind a daemon-owned interface.
+- [x] Persist only approved fields and avoid raw secrets/transcripts unless explicitly redacted and justified.
+- [x] Load persisted state on daemon startup and prune expired records.
+- [x] Add tests for persistence round trip, retention pruning, redaction behavior, and corrupt-store handling.
+- [x] Document backup/delete/reset procedures for local operators.
 
 ## Tests
 
@@ -69,18 +69,25 @@ Manual smoke after implementation:
 
 ## Completion Criteria
 
-- [ ] Alfred has an explicit local storage decision and documented app-dir path.
-- [ ] Persisted state survives daemon restart where intended.
-- [ ] Pending drafts are either deliberately session-only or persisted with a documented safety rationale.
-- [ ] Retention pruning and redaction are tested.
-- [ ] No committed fixtures contain real transcripts or tokens.
-- [ ] Standalone Alfred gates pass.
+- [x] Alfred has an explicit local storage decision and documented app-dir path.
+- [x] Persisted state survives daemon restart where intended.
+- [x] Pending drafts are either deliberately session-only or persisted with a documented safety rationale.
+- [x] Retention pruning and redaction are tested.
+- [x] No committed fixtures contain real transcripts or tokens.
+- [x] Standalone Alfred gates pass.
 
 ## Notes
 
 - Treat transcript/history data as sensitive local data even when it originated on localhost.
 - The safest initial default is to persist metadata and short audit events, not raw terminal contents.
 - If task 010 is not complete when 011 starts, explicitly defer loop-state persistence and persist only non-loop metadata/events.
+- Storage decision/operator procedures are documented in `docs/storage/local-persistence.md`.
+- Loop runtime state remains session-only in this pass; loop lifecycle audit events persist when their retention policy allows it.
+
+## Validation Evidence
+
+- 2026-06-22: `npm run typecheck` passed.
+- 2026-06-22: `npm test` passed, 63 tests.
 
 ## Blockers
 

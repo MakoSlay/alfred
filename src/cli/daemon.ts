@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createAlfredDaemon, type AlfredDaemon, type AlfredDaemonConfig } from "../daemon/index.ts";
 import { formatHostForUrl } from "../lib/host-formatting.ts";
+import { defaultAlfredStorageDir } from "../storage/index.ts";
 
 export const DEFAULT_DAEMON_HOST = "127.0.0.1";
 export const DEFAULT_DAEMON_PORT = 47_321;
@@ -13,7 +14,7 @@ export interface DaemonCliConfig {
 	readonly authToken: string;
 	readonly tokenSource: DaemonTokenSource;
 	readonly dashboardUrl: string;
-	readonly daemonConfig: Pick<AlfredDaemonConfig, "host" | "port" | "authToken">;
+	readonly daemonConfig: Pick<AlfredDaemonConfig, "host" | "port" | "authToken" | "storageDir">;
 }
 
 type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
@@ -26,7 +27,7 @@ export interface RunDaemonCliOptions {
 	readonly env?: NodeJS.ProcessEnv;
 	readonly stdout?: Pick<NodeJS.WriteStream, "write">;
 	readonly stderr?: Pick<NodeJS.WriteStream, "write">;
-	readonly createDaemon?: (config: Pick<AlfredDaemonConfig, "host" | "port" | "authToken">) => AlfredDaemon;
+	readonly createDaemon?: (config: Pick<AlfredDaemonConfig, "host" | "port" | "authToken" | "storageDir">) => AlfredDaemon;
 	readonly randomToken?: () => string;
 	readonly signals?: DaemonSignalEmitter;
 	readonly shutdownTimeoutMs?: number;
@@ -41,6 +42,7 @@ export function parseDaemonCliConfig(
 	const configuredToken = normalizedEnvValue(env.ALFRED_LOCAL_TOKEN);
 	const tokenSource: DaemonTokenSource = configuredToken ? "env" : "generated";
 	const authToken = configuredToken ?? randomToken();
+	const storageDir = defaultAlfredStorageDir(env);
 	const dashboardUrl = `http://${formatHostForUrl(host)}:${port}/dashboard`;
 
 	return {
@@ -49,7 +51,7 @@ export function parseDaemonCliConfig(
 		authToken,
 		tokenSource,
 		dashboardUrl,
-		daemonConfig: { host, port, authToken },
+		daemonConfig: { host, port, authToken, storageDir },
 	};
 }
 
@@ -67,6 +69,7 @@ export function formatDaemonStartupMessage(config: DaemonCliConfig): string {
 		lines.push("Use API header: x-alfred-auth: <your ALFRED_LOCAL_TOKEN>");
 	}
 
+	lines.push(`Storage: ${config.daemonConfig.storageDir}`);
 	lines.push("Shutdown: press Ctrl+C or send SIGTERM/SIGHUP.");
 	return `${lines.join("\n")}\n`;
 }

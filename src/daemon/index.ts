@@ -24,6 +24,7 @@ import { createCmuxWorldModelAdapter, type CmuxResult, type CmuxWorldModelAdapte
 import { formatHostForUrl } from "../lib/host-formatting.ts";
 import { buildPlannerInput, plannerInputSummary, validatePlannerResult, type AlfredPlanner, type AlfredPlannerIntent, type AlfredPlannerResult } from "../planner/index.ts";
 import { createAlfredLoopManager, type AlfredLoopDecision, type AlfredLoopManager, type AlfredLoopRuntimeState, type AlfredLoopScheduler, type AlfredLoopStartRequest } from "../loops/index.ts";
+import { createJsonFileStorage, defaultAlfredStorageDir, type AlfredStorageAdapter } from "../storage/index.ts";
 
 export interface AlfredDaemonConfig {
 	readonly host: string;
@@ -32,6 +33,7 @@ export interface AlfredDaemonConfig {
 	readonly allowedHosts: readonly string[];
 	readonly allowedOrigins: readonly string[];
 	readonly maxBodyBytes: number;
+	readonly storageDir?: string | null;
 }
 
 export interface AlfredDaemonStateSnapshot {
@@ -40,6 +42,7 @@ export interface AlfredDaemonStateSnapshot {
 	activeLoop: AlfredLoopSummary | null;
 	recentTargets: AlfredTarget[];
 	events: AlfredEvent[];
+	storageWarnings?: string[];
 }
 
 type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace">;
@@ -51,6 +54,7 @@ export interface AlfredDaemonDependencies {
 	loopDecider?: (loop: AlfredLoopRuntimeState, transcript: string) => Promise<AlfredLoopDecision>;
 	loopScheduler?: AlfredLoopScheduler;
 	loopManager?: AlfredLoopManager;
+	storage?: AlfredStorageAdapter | null;
 }
 
 export interface AlfredDaemon {
@@ -90,6 +94,8 @@ interface DaemonState {
 	recentTargets: AlfredTarget[];
 	events: AlfredEvent[];
 	pendingDrafts: AlfredDraft[];
+	storage?: AlfredStorageAdapter;
+	storageWarnings: string[];
 }
 
 interface DraftIntent {
@@ -115,6 +121,7 @@ export function defaultDaemonConfig(overrides: Partial<AlfredDaemonConfig> = {})
 		allowedHosts: overrides.allowedHosts ?? ["127.0.0.1", "localhost", "::1", "[::1]"],
 		allowedOrigins: overrides.allowedOrigins ?? [...new Set([`http://${originHost}:${port}`, `http://localhost:${port}`, `http://127.0.0.1:${port}`, `http://[::1]:${port}`])],
 		maxBodyBytes: overrides.maxBodyBytes ?? 128 * 1024,
+		storageDir: overrides.storageDir === null ? null : overrides.storageDir ?? defaultAlfredStorageDir(),
 	};
 }
 
@@ -123,7 +130,8 @@ export function createAlfredDaemon(
 	dependencies: AlfredDaemonDependencies = {},
 ): AlfredDaemon {
 	const resolvedConfig = defaultDaemonConfig(config);
-	const state: DaemonState = { recentTargets: [], events: [], pendingDrafts: [] };
+	const storage = dependencies.storage === null ? undefined : dependencies.storage ?? (resolvedConfig.storageDir ? createJsonFileStorage({ appDir: resolvedConfig.storageDir }) : undefined);
+	const state: DaemonState = { recentTargets: [], events: [], pendingDrafts: [], storage, storageWarnings: [] };
 	const cmux = dependencies.cmux ?? createCmuxWorldModelAdapter();
 	const now = dependencies.now ?? (() => new Date());
 	const planner = dependencies.planner;
@@ -135,6 +143,7 @@ export function createAlfredDaemon(
 	return {
 		config: resolvedConfig,
 		async start() {
+			loadPersistedState(state, now().toISOString());
 			await new Promise<void>((resolve, reject) => {
 				const timeout = setTimeout(() => {
 					server.off("error", onStartupError);
@@ -217,7 +226,7 @@ async function handleDaemonRequest(
 			});
 			return;
 		}
-		state.recentTargets = targets.value;
+		rememberTargets(state, targets.value, now().toISOString());
 		writeJson(response, 200, { ok: true, targets: targets.value });
 		return;
 	}
@@ -336,7 +345,7 @@ async function handleRequest(
 	if (!targets.ok) {
 		return cmuxUnavailableResponse(request.requestId, now().toISOString(), targets.error.message);
 	}
-	state.recentTargets = targets.value;
+	rememberTargets(state, targets.value, now().toISOString());
 	const draftIntent = resolveDraftIntent(inputText, targets.value, request.context?.currentWorkspaceRef);
 	if (draftIntent) {
 		return createDraftResponse(request, effectiveSource, draftIntent, state, now);
@@ -520,7 +529,7 @@ async function confirmDraft(
 	if (!targets.ok) {
 		return cmuxUnavailableResponse(requestId, createdAt, targets.error.message);
 	}
-	state.recentTargets = targets.value;
+	rememberTargets(state, targets.value, now().toISOString());
 	const liveTarget = targets.value.find((target) => target.ref === draft.target.ref || (draft.target.surfaceRef && target.surfaceRef === draft.target.surfaceRef));
 	if (!liveTarget) {
 		draft.status = "failed";
@@ -1104,7 +1113,27 @@ function pruneExpiredDrafts(state: DaemonState, nowIso: IsoTimestamp): void {
 function pushEvent(state: DaemonState, event: AlfredEvent): AlfredEvent {
 	state.events.unshift(event);
 	state.events = state.events.slice(0, 100);
+	recordStorageWarning(state, state.storage?.appendEvent(event));
 	return event;
+}
+
+function loadPersistedState(state: DaemonState, nowIso: IsoTimestamp): void {
+	if (!state.storage) return;
+	const loaded = state.storage.load(nowIso);
+	state.events = loaded.events;
+	state.recentTargets = loaded.recentTargets;
+	state.storageWarnings = loaded.warnings.slice(-20);
+	recordStorageWarning(state, state.storage.prune(nowIso));
+}
+
+function rememberTargets(state: DaemonState, targets: readonly AlfredTarget[], updatedAt: IsoTimestamp): void {
+	state.recentTargets = [...targets];
+	recordStorageWarning(state, state.storage?.saveTargets(targets, updatedAt));
+}
+
+function recordStorageWarning(state: DaemonState, warning: string | null | undefined): void {
+	if (!warning) return;
+	state.storageWarnings = [...state.storageWarnings, warning].slice(-20);
 }
 
 function applyAllowedCapabilities(source: AlfredSource, allowedCapabilities?: readonly AlfredCapability[]): AlfredSource {
@@ -1422,11 +1451,12 @@ li { border: 1px solid color-mix(in srgb, CanvasText 12%, transparent); border-r
 
 function snapshotState(state: DaemonState, loopManager?: AlfredLoopManager): AlfredDaemonStateSnapshot {
 	return {
-		health: "ok",
+		health: state.storageWarnings.length > 0 ? "degraded" : "ok",
 		pendingDrafts: state.pendingDrafts,
 		activeLoop: loopManager?.status() ?? null,
 		recentTargets: state.recentTargets,
 		events: state.events,
+		storageWarnings: state.storageWarnings.length > 0 ? state.storageWarnings : undefined,
 	};
 }
 

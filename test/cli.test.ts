@@ -10,6 +10,7 @@ import {
 	parseDaemonCliConfig,
 	runDaemonCli,
 } from "../src/cli/daemon.ts";
+import { defaultAlfredStorageDir } from "../src/storage/index.ts";
 
 type TestDaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
 
@@ -21,7 +22,7 @@ test("daemon CLI env parsing uses safe defaults and generated token", () => {
 	assert.equal(config.authToken, "generated-test-token");
 	assert.equal(config.tokenSource, "generated");
 	assert.equal(config.dashboardUrl, "http://127.0.0.1:47321/dashboard");
-	assert.deepEqual(config.daemonConfig, { host: "127.0.0.1", port: 47321, authToken: "generated-test-token" });
+	assert.deepEqual(config.daemonConfig, { host: "127.0.0.1", port: 47321, authToken: "generated-test-token", storageDir: defaultAlfredStorageDir({}) });
 });
 
 test("daemon CLI env parsing accepts loopback host, port, and configured token", () => {
@@ -29,6 +30,7 @@ test("daemon CLI env parsing accepts loopback host, port, and configured token",
 		ALFRED_HOST: "localhost",
 		ALFRED_PORT: "47322",
 		ALFRED_LOCAL_TOKEN: "configured-token",
+		ALFRED_STORAGE_DIR: "/tmp/alfred-test-store",
 	}, () => "unused-generated-token");
 
 	assert.equal(config.host, "localhost");
@@ -36,6 +38,7 @@ test("daemon CLI env parsing accepts loopback host, port, and configured token",
 	assert.equal(config.authToken, "configured-token");
 	assert.equal(config.tokenSource, "env");
 	assert.equal(config.dashboardUrl, "http://localhost:47322/dashboard");
+	assert.equal(config.daemonConfig.storageDir, "/tmp/alfred-test-store");
 });
 
 test("daemon CLI formats IPv6 loopback dashboard URLs", () => {
@@ -80,6 +83,7 @@ test("daemon CLI prints generated token once only after startup succeeds", () =>
 	assert.match(startupMessage, /Alfred daemon starting/);
 	assert.match(startupMessage, /Listening: http:\/\/127\.0\.0\.1:47321/);
 	assert.match(startupMessage, /Dashboard: http:\/\/127\.0\.0\.1:47321\/dashboard/);
+	assert.match(startupMessage, /Storage: /);
 	assert.doesNotMatch(startupMessage, /generated-test-token/);
 	assert.match(startedMessage, /Generated token: generated-test-token/);
 	assert.match(startedMessage, /x-alfred-auth: <generated token above>/);

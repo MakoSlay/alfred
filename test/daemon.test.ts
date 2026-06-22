@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import http from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { createAlfredDaemon, defaultDaemonConfig } from "../src/daemon/index.ts";
 import { cliSource, piCommandSource, powerCodeTarget } from "../src/testing/fixtures.ts";
@@ -50,7 +53,7 @@ async function withDaemon(
 ): Promise<void> {
 	const mock = createMockCmux();
 	const daemon = createAlfredDaemon(
-		{ host: "127.0.0.1", port: 0, authToken: "test-token", allowedOrigins: ["http://127.0.0.1"] },
+		{ host: "127.0.0.1", port: 0, authToken: "test-token", allowedOrigins: ["http://127.0.0.1"], storageDir: null },
 		{ cmux: mock.cmux, now: () => new Date("2026-06-19T22:00:00.000Z"), planner: dependencies.planner, loopDecider: dependencies.loopDecider, loopScheduler: dependencies.loopScheduler },
 	);
 	const started = await daemon.start();
@@ -119,6 +122,52 @@ test("daemon surfaces endpoint is backed by the cmux adapter dependency", async 
 		assert.equal(body.targets.some((target) => target.kind === "pi-chat"), true);
 		assert.equal(body.targets.some((target) => target.kind === "codex-session"), true);
 	});
+});
+
+test("daemon persists audit events and target memory but not pending drafts", async () => {
+	const storageDir = await mkdtemp(join(tmpdir(), "alfred-daemon-store-"));
+	try {
+		const mock = createMockCmux();
+		const firstDaemon = createAlfredDaemon(
+			{ host: "127.0.0.1", port: 0, authToken: "test-token", storageDir, allowedOrigins: ["http://127.0.0.1"] },
+			{ cmux: mock.cmux, now: () => new Date("2026-06-19T22:00:00.000Z") },
+		);
+		const first = await firstDaemon.start();
+		const firstBaseUrl = `http://${first.host}:${first.port}`;
+		await fetch(`${firstBaseUrl}/surfaces`, { headers: authHeaders(first.authToken) });
+		const handled = await postJson<{ ok: boolean; events: Array<{ requestId?: string }> }>(firstBaseUrl, first.authToken, "/handle", {
+			requestId: "req_persist_noop",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: cliSource(),
+			input: { text: "what can you see?" },
+		});
+		assert.equal(handled.status, 200);
+		assert.equal(handled.body.ok, true);
+		const draft = (await createPowercoDraft(firstBaseUrl, first.authToken)).body.pendingDraft;
+		assert.ok(draft);
+		await firstDaemon.stop();
+
+		const secondDaemon = createAlfredDaemon(
+			{ host: "127.0.0.1", port: 0, authToken: "test-token", storageDir, allowedOrigins: ["http://127.0.0.1"] },
+			{ cmux: mock.cmux, now: () => new Date("2026-06-19T22:01:00.000Z") },
+		);
+		const second = await secondDaemon.start();
+		try {
+			const state = await fetch(`http://${second.host}:${second.port}/state`, { headers: authHeaders(second.authToken) });
+			const stateBody = await state.json() as { health: string; pendingDrafts: AlfredDraft[]; recentTargets: AlfredTarget[]; events: Array<{ kind: string; requestId?: string }> };
+			assert.equal(stateBody.health, "ok");
+			assert.deepEqual(stateBody.pendingDrafts, []);
+			assert.equal(stateBody.recentTargets.some((target) => target.label === "π - Power Code"), true);
+			assert.equal(stateBody.events.some((event) => event.requestId === "req_persist_noop"), true);
+			assert.equal(stateBody.events.some((event) => event.kind === "draft.created"), false);
+			const eventLog = await readFile(join(storageDir, "events.jsonl"), "utf8");
+			assert.equal(eventLog.includes("try to implement ways to fix it"), false);
+		} finally {
+			await secondDaemon.stop();
+		}
+	} finally {
+		await rm(storageDir, { recursive: true, force: true });
+	}
 });
 
 test("POST /handle returns typed contract response and process-owned events", async () => {
@@ -477,7 +526,7 @@ test("loop poll can autonomously send only with loop.autonomousSend", async () =
 test("autonomous loop send failures do not claim success", async () => {
 	const mock = createMockCmux({ sendError: { code: "command_failed", message: "cmux send failed" } });
 	const daemon = createAlfredDaemon(
-		{ host: "127.0.0.1", port: 0, authToken: "test-token" },
+		{ host: "127.0.0.1", port: 0, authToken: "test-token", storageDir: null },
 		{
 			cmux: mock.cmux,
 			now: () => new Date("2026-06-19T22:00:00.000Z"),
@@ -691,7 +740,7 @@ test("confirm fails closed when the target disappears before confirmation", asyn
 test("failed sends do not claim success", async () => {
 	const mock = createMockCmux({ sendError: { code: "command_failed", message: "cmux send failed" } });
 	const daemon = createAlfredDaemon(
-		{ host: "127.0.0.1", port: 0, authToken: "test-token" },
+		{ host: "127.0.0.1", port: 0, authToken: "test-token", storageDir: null },
 		{ cmux: mock.cmux, now: () => new Date("2026-06-19T22:00:00.000Z") },
 	);
 	const started = await daemon.start();
@@ -780,7 +829,7 @@ test("daemon rejects DNS rebinding and cross-origin browser-style requests", asy
 
 test("daemon reports structured errors for bad JSON and unavailable cmux", async () => {
 	const daemon = createAlfredDaemon(
-		{ host: "127.0.0.1", port: 0, authToken: "test-token" },
+		{ host: "127.0.0.1", port: 0, authToken: "test-token", storageDir: null },
 		{
 			cmux: {
 				async listTargets() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
