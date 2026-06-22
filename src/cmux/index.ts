@@ -160,17 +160,17 @@ export function createCmuxWorldModelAdapter(options: CmuxAdapterOptions = {}): C
 		if (!workspace) {
 			return { ok: false, error: { code: "target_not_found", message: `Workspace not found: ${selectedWorkspaceRef}` } };
 		}
-		const raw = await runCmux(["tree", "--workspace", workspace.ref]);
-		if (!raw.ok) return raw;
-		return { ok: true, value: parseSurfaceTree(raw.value, workspace, currentValue) };
+		return await listSurfacesForWorkspace(workspace, currentValue);
 	}
 
 	async function listTargets(): Promise<CmuxResult<AlfredTarget[]>> {
 		const workspaces = await listWorkspaces();
 		if (!workspaces.ok) return workspaces;
+		const current = await identifyCurrent();
+		const currentValue = current.ok ? current.value : {};
 		const targets: AlfredTarget[] = workspaces.value.map((workspace) => workspace.target);
 		for (const workspace of workspaces.value) {
-			const surfaces = await listSurfaces(workspace.ref);
+			const surfaces = await listSurfacesForWorkspace(workspace, currentValue);
 			if (surfaces.ok) {
 				targets.push(...surfaces.value.map((surface) => surface.target));
 			}
@@ -239,10 +239,18 @@ export function createCmuxWorldModelAdapter(options: CmuxAdapterOptions = {}): C
 		return { ok: true, value: { surfaceRef, key } };
 	}
 
+	async function listSurfacesForWorkspace(workspace: CmuxWorkspaceInfo, currentValue: CmuxIdentifyInfo): Promise<CmuxResult<CmuxSurfaceInfo[]>> {
+		const raw = await runCmux(["tree", "--workspace", workspace.ref]);
+		if (!raw.ok) return raw;
+		return { ok: true, value: parseSurfaceTree(raw.value, workspace, currentValue) };
+	}
+
 	async function listAllSurfaces(workspaces: CmuxWorkspaceInfo[]): Promise<CmuxResult<CmuxSurfaceInfo[]>> {
+		const current = await identifyCurrent();
+		const currentValue = current.ok ? current.value : {};
 		const all: CmuxSurfaceInfo[] = [];
 		for (const workspace of workspaces) {
-			const surfaces = await listSurfaces(workspace.ref);
+			const surfaces = await listSurfacesForWorkspace(workspace, currentValue);
 			if (surfaces.ok) {
 				all.push(...surfaces.value);
 			}

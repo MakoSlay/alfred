@@ -105,7 +105,9 @@ Then disable daemon mode and verify Pi-local fallback still works.
 - 2026-06-22: `/Users/muhammadabdul/work/pi-smart-voice-notify` `npm run typecheck` — passed.
 - 2026-06-22: `/Users/muhammadabdul/work/pi-smart-voice-notify` `npm test` — passed (71 tests).
 - 2026-06-22: Cross-repo loop bridge smoke with a programmatic Alfred daemon and mock cmux target — `callAlfredDaemonLoopStart`, `callAlfredDaemonLoopStatus`, and `callAlfredDaemonLoopStop` all returned handled success.
-- 2026-06-22: Live CLI daemon smoke on `ALFRED_PORT=47324` confirmed loop bridge auth/transport behavior, but full real-cmux loop start was blocked by local cmux returning `Failed to write to socket (Broken pipe, errno 32)` for `cmux workspace list --json --id-format both`. This is an environment/cmux availability issue, not a bridge-contract failure; rollback is leaving daemon bridge flags disabled.
+- 2026-06-22: Initial live CLI daemon smoke on `ALFRED_PORT=47324` exposed intermittent cmux `Failed to write to socket (Broken pipe, errno 32)` when daemon target discovery repeatedly invoked `cmux workspace list` while enumerating surfaces.
+- 2026-06-22: Reduced daemon cmux target discovery to list workspaces once per target enumeration, then reuse the parsed workspace data while reading each workspace tree.
+- 2026-06-22: Real-cmux live smoke passed on `ALFRED_PORT=47330`: daemon `/surfaces` returned a target, and Pi daemon-client `callAlfredDaemonLoopStart`, `callAlfredDaemonLoopStatus`, and `callAlfredDaemonLoopStop` returned handled success against `surface:14`.
 
 ## Blockers
 
