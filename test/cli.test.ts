@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AlfredDaemonConfig } from "../src/daemon/index.ts";
 import {
 	DEFAULT_DAEMON_HOST,
@@ -11,8 +14,53 @@ import {
 	runDaemonCli,
 } from "../src/cli/daemon.ts";
 import { defaultAlfredStorageDir } from "../src/storage/index.ts";
+import { parseAlfredLocalTokenEnv, runCopyTokenCli } from "../src/cli/copy-token.ts";
 
 type TestDaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP";
+
+test("token copy CLI parses stable token env files", () => {
+	assert.equal(parseAlfredLocalTokenEnv("export ALFRED_LOCAL_TOKEN=plain-token\n"), "plain-token");
+	assert.equal(parseAlfredLocalTokenEnv("# comment\nALFRED_LOCAL_TOKEN='quoted-token'\n"), "quoted-token");
+	assert.equal(parseAlfredLocalTokenEnv("ALFRED_LOCAL_TOKEN=token-before-comment # local secret\n"), "token-before-comment");
+	assert.equal(parseAlfredLocalTokenEnv("ALFRED_DAEMON_ENABLED=true\n"), null);
+});
+
+test("token copy CLI copies token without printing it", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "alfred-token-copy-"));
+	const envFile = join(dir, "daemon.env");
+	await writeFile(envFile, "export ALFRED_LOCAL_TOKEN=secret-token-for-clipboard\n", "utf8");
+	let copied = "";
+	let stdout = "";
+	let stderr = "";
+	const exitCode = await runCopyTokenCli({
+		envFile,
+		writeClipboard: async (value) => { copied = value; },
+		stdout: { write: (chunk: string | Uint8Array) => { stdout += String(chunk); return true; } },
+		stderr: { write: (chunk: string | Uint8Array) => { stderr += String(chunk); return true; } },
+	});
+
+	assert.equal(exitCode, 0);
+	assert.equal(copied, "secret-token-for-clipboard");
+	assert.match(stdout, /copied to clipboard/);
+	assert.equal(stdout.includes("secret-token-for-clipboard"), false);
+	assert.equal(stderr, "");
+});
+
+test("token copy CLI fails clearly when token is missing", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "alfred-token-copy-missing-"));
+	const envFile = join(dir, "daemon.env");
+	await writeFile(envFile, "export ALFRED_DAEMON_ENABLED=true\n", "utf8");
+	let stderr = "";
+	const exitCode = await runCopyTokenCli({
+		envFile,
+		writeClipboard: async () => { throw new Error("should not copy"); },
+		stdout: { write: () => true },
+		stderr: { write: (chunk: string | Uint8Array) => { stderr += String(chunk); return true; } },
+	});
+
+	assert.equal(exitCode, 1);
+	assert.match(stderr, /No ALFRED_LOCAL_TOKEN/);
+});
 
 test("daemon CLI env parsing uses safe defaults and generated token", () => {
 	const config = parseDaemonCliConfig({}, () => "generated-test-token");
