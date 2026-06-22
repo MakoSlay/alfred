@@ -243,35 +243,56 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
     }
   }
 
-  function renderDrafts(items) {
+  function renderPendingActions(actions, legacyDrafts) {
     drafts.replaceChildren();
-    if (!items?.length) return clearList(drafts, 'No pending drafts. Drafts are intentionally not persisted across daemon restarts.');
-    for (const draft of items) {
+    const items = actions?.length ? actions : legacyDrafts || [];
+    if (!items?.length) return clearList(drafts, 'No pending actions. Pending actions are intentionally not persisted across daemon restarts.');
+    const draftById = new Map((legacyDrafts || []).map((draft) => [draft.id, draft]));
+    for (const pending of items) {
+      const draft = draftById.get(pending.id) || (pending.text && pending.target ? pending : null);
       const item = document.createElement('li');
       const title = document.createElement('strong');
-      title.textContent = draft.target?.label || draft.target?.ref || draft.id;
-      const text = document.createElement('textarea');
-      const redactionStatus = draft.text?.redaction?.status;
-      const editableText = redactionStatus !== 'contains_sensitive' && redactionStatus !== 'redacted';
-      text.value = editableText ? (draft.text?.value || '') : '';
-      text.placeholder = editableText ? '' : '[redacted by Alfred; edit disabled]';
-      text.disabled = !editableText;
-      text.setAttribute('aria-label', 'Editable draft text for ' + (draft.target?.label || draft.id));
-      const expires = line('meta warning', 'Action ' + draft.id + ' · expires ' + draft.expiresAt + ' · created by ' + (draft.createdBy?.label || draft.createdBy?.kind || 'unknown'));
-      const actions = document.createElement('div');
-      actions.className = 'actions';
+      title.textContent = pending.label || pending.actionMetaId || pending.target?.label || pending.id;
+      const target = pending.target?.label || pending.target?.ref || draft?.target?.label || 'No target';
+      const risk = pending.riskLevel || 'confirmation_required';
+      const statusText = pending.status || draft?.status || 'pending';
+      const meta = line('meta', 'Action ' + pending.id + ' · ' + (pending.actionMetaId || 'cmux.sendText') + ' · risk ' + risk + ' · status ' + statusText + ' · target ' + target);
+      const expires = line('meta warning', 'Expires ' + (pending.expiresAt || draft?.expiresAt || 'unknown') + ' · proposed by ' + (pending.proposedBy?.label || pending.proposedBy?.kind || draft?.createdBy?.label || draft?.createdBy?.kind || 'unknown'));
+      item.append(title, meta, expires);
+
+      let editedText;
+      const isSendText = (pending.actionMetaId || '') === 'cmux.sendText' || Boolean(draft?.text);
+      if (isSendText) {
+        const text = document.createElement('textarea');
+        const redactionStatus = draft?.text?.redaction?.status;
+        const editableText = Boolean(pending.editable ?? true) && redactionStatus !== 'contains_sensitive' && redactionStatus !== 'redacted';
+        text.value = editableText ? (draft?.text?.value || pending.input?.text || '') : '';
+        text.placeholder = editableText ? '' : '[redacted by Alfred; edit disabled]';
+        text.disabled = !editableText;
+        text.setAttribute('aria-label', 'Editable pending action text for ' + target);
+        editedText = text;
+        item.append(text);
+      } else {
+        const previewLabel = line('meta', 'Preview payload');
+        const preview = document.createElement('pre');
+        preview.textContent = JSON.stringify(pending.preview || pending.input || {}, null, 2);
+        item.append(previewLabel, preview);
+      }
+
+      const actionsNode = document.createElement('div');
+      actionsNode.className = 'actions';
       const confirm = document.createElement('button');
       confirm.type = 'button';
       confirm.className = 'primary';
-      confirm.textContent = 'Confirm send';
-      confirm.addEventListener('click', () => confirmDraft(draft.id, draft.target?.label || draft.target?.ref || draft.id, text.disabled ? undefined : text.value).catch((error) => setStatus(error.message, 'error')));
+      confirm.textContent = isSendText ? 'Confirm send' : 'Approve action';
+      confirm.addEventListener('click', () => confirmPendingAction(pending.id, target, editedText?.disabled ? undefined : editedText?.value).catch((error) => setStatus(error.message, 'error')));
       const cancel = document.createElement('button');
       cancel.type = 'button';
       cancel.className = 'danger';
-      cancel.textContent = 'Cancel draft';
-      cancel.addEventListener('click', () => cancelDraft(draft.id).catch((error) => setStatus(error.message, 'error')));
-      actions.append(confirm, cancel);
-      item.append(title, text, expires, actions);
+      cancel.textContent = isSendText ? 'Cancel draft' : 'Cancel action';
+      cancel.addEventListener('click', () => cancelPendingAction(pending.id).catch((error) => setStatus(error.message, 'error')));
+      actionsNode.append(confirm, cancel);
+      item.append(actionsNode);
       drafts.append(item);
     }
   }
@@ -312,21 +333,21 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
     renderHealth(state, surfaceItems);
     renderLoop(state?.activeLoop || null);
     renderSurfaces(surfaceItems);
-    renderDrafts(state?.pendingDrafts || []);
+    renderPendingActions(state?.pendingActions || [], state?.pendingDrafts || []);
     renderEvents(state?.events || []);
     setStatus('Updated ' + new Date().toLocaleTimeString() + '. API requests used the local auth header.');
   }
 
-  async function confirmDraft(draftId, label, text) {
-    if (!window.confirm('Send this pending action to ' + label + '? This cannot be undone.')) return;
-    setStatus('Confirming pending action through authenticated /confirm...');
-    await api('/confirm', { method: 'POST', body: JSON.stringify({ draftId, text }) });
+  async function confirmPendingAction(pendingActionId, label, text) {
+    if (!window.confirm('Approve this pending action for ' + label + '? This cannot be undone.')) return;
+    setStatus('Approving pending action through authenticated /confirm...');
+    await api('/confirm', { method: 'POST', body: JSON.stringify({ pendingActionId, text }) });
     await refresh();
   }
 
-  async function cancelDraft(draftId) {
-    setStatus('Cancelling draft through authenticated /cancel...');
-    await api('/cancel', { method: 'POST', body: JSON.stringify({ draftId, reason: 'dashboard cancel' }) });
+  async function cancelPendingAction(pendingActionId) {
+    setStatus('Cancelling pending action through authenticated /cancel...');
+    await api('/cancel', { method: 'POST', body: JSON.stringify({ pendingActionId, reason: 'dashboard cancel' }) });
     await refresh();
   }
 

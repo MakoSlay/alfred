@@ -49,7 +49,7 @@ export interface AlfredDaemonStateSnapshot {
 	storageWarnings?: string[];
 }
 
-type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace" | "openDiff">;
+type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace" | "sendKeyToSurface" | "openDiff">;
 
 export interface AlfredDaemonDependencies {
 	cmux?: AlfredDaemonCmux;
@@ -112,6 +112,12 @@ interface DaemonState {
 interface DraftIntent {
 	target: AlfredTarget;
 	message: string;
+	confidence: AlfredTarget["confidence"];
+}
+
+interface KeyIntent {
+	target: AlfredTarget;
+	key: string;
 	confidence: AlfredTarget["confidence"];
 }
 
@@ -365,6 +371,10 @@ async function handleRequest(
 	if (isOpenDiffInput(inputText)) {
 		return await executeSafeAction(request, effectiveSource, state, cmux, now, "cmux.openDiff", { unstaged: true });
 	}
+	const keyIntent = resolveSendKeyIntent(inputText, targets.value, request.context?.currentWorkspaceRef);
+	if (keyIntent) {
+		return createPendingKeyActionResponse(request, effectiveSource, keyIntent, state, now);
+	}
 	const draftIntent = resolveDraftIntent(inputText, targets.value, request.context?.currentWorkspaceRef);
 	if (draftIntent) {
 		return createDraftResponse(request, effectiveSource, draftIntent, state, now);
@@ -521,6 +531,40 @@ function createNoActionResponse(
 	};
 }
 
+function createPendingKeyActionResponse(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	intent: KeyIntent,
+	state: DaemonState,
+	now: () => Date,
+): AlfredHandleResponse {
+	const createdAt = now().toISOString();
+	const proposed = state.actions.propose({
+		actionId: "cmux.sendKey",
+		input: { key: intent.key, targetRef: intent.target.ref },
+		source,
+		target: { ...intent.target, confidence: intent.confidence },
+		editable: false,
+		ttlMs: DEFAULT_DRAFT_TTL_MS,
+	});
+	if (!proposed.ok) {
+		recordActionEvent(state, proposed.event);
+		return capabilityDeniedResponse(request.requestId, createdAt, proposed.decision.message);
+	}
+	const event = recordActionEvent(state, proposed.event);
+	return {
+		requestId: request.requestId,
+		createdAt,
+		ok: true,
+		speech: source.presentation?.wantsSpeech ? `Shall I send ${intent.key} to ${intent.target.label}, sir?` : undefined,
+		displayText: `Pending action ready: send key ${intent.key} to ${intent.target.label}. Confirm before executing.`,
+		proposedActions: [],
+		pendingAction: proposed.pending,
+		events: [event],
+		nextStatePatch: { rememberTarget: intent.target },
+	};
+}
+
 function createDraftResponse(
 	request: AlfredHandleRequest,
 	source: AlfredSource,
@@ -587,24 +631,29 @@ async function confirmDraft(
 	cmux: AlfredDaemonCmux,
 	now: () => Date,
 ): Promise<AlfredHandleResponse> {
+	const pending = findPendingActionForApproval(state, request.pendingActionId, request.draftId);
+	if (pending?.actionMetaId === "cmux.sendText") {
+		return await confirmSendPendingAction(request, state, cmux, now, pending);
+	}
+	return await confirmGenericPendingAction(request, state, cmux, now, pending ?? null);
+}
+
+async function confirmSendPendingAction(
+	request: AlfredConfirmRequest,
+	state: DaemonState,
+	cmux: AlfredDaemonCmux,
+	now: () => Date,
+	pending: PendingAction | null,
+): Promise<AlfredHandleResponse> {
 	const createdAt = now().toISOString();
 	const requestId = request.requestId ?? nextId("req_confirm");
-	const pending = findPendingSendAction(state, request.pendingActionId ?? request.draftId);
 	const draft = pending ? draftFromPendingAction(pending) : null;
 	if (!pending || !draft) {
-		return {
-			requestId,
-			createdAt,
-			ok: false,
-			displayText: "There is no pending draft to confirm.",
-			proposedActions: [],
-			events: [],
-			errors: [{ code: "confirmation_expired", message: "No pending draft was found.", retryable: false }],
-		};
+		return pendingActionNotFoundResponse(requestId, createdAt, "confirm");
 	}
 	if (draft.expiresAt <= createdAt) {
-		pending.status = "expired";
-		const expiredEvent = pushEvent(state, {
+		const approved = state.actions.approve(pending.id, request.source ?? pending.proposedBy, pending.target);
+		const expiredEvent = approved.event ? recordActionEvent(state, approved.event) : pushEvent(state, {
 			id: nextId("evt"),
 			kind: "action.expired",
 			createdAt,
@@ -619,10 +668,10 @@ async function confirmDraft(
 			requestId,
 			createdAt,
 			ok: false,
-			displayText: "That draft has expired.",
+			displayText: "That pending action has expired.",
 			proposedActions: [],
 			events: [expiredEvent],
-			errors: [{ code: "confirmation_expired", message: "Draft confirmation expired.", retryable: false }],
+			errors: [{ code: "confirmation_expired", message: "Pending action confirmation expired.", retryable: false }],
 		};
 	}
 	const source = request.source ?? pending.proposedBy;
@@ -666,7 +715,7 @@ async function confirmDraft(
 		return capabilityDeniedResponse(requestId, createdAt, `Target ${liveTarget.label} does not support ${requiredCapabilities.join(", ")}.`);
 	}
 	const approved = state.actions.approve(pending.id, source, liveTarget);
-	if (approved.event) recordActionEvent(state, approved.event);
+	const approvedEvent = approved.event ? recordActionEvent(state, approved.event) : null;
 	if (!approved.ok || !approved.pending) {
 		const code = approved.pending?.status === "expired" ? "confirmation_expired" : "capability_denied";
 		return {
@@ -675,7 +724,7 @@ async function confirmDraft(
 			ok: false,
 			displayText: approved.event?.summary ?? "Pending action could not be approved.",
 			proposedActions: [],
-			events: approved.event ? [approved.event] : [],
+			events: approvedEvent ? [approvedEvent] : [],
 			errors: [{ code, message: approved.event?.summary ?? "Pending action could not be approved.", retryable: false }],
 		};
 	}
@@ -710,7 +759,7 @@ async function confirmDraft(
 		now,
 		cmux: cmux as never,
 	});
-	recordActionEvent(state, executed.event);
+	const executedEvent = recordActionEvent(state, executed.event);
 	if (!executed.ok) {
 		const failedEvent = pushSendFailedEvent(state, requestId, now().toISOString(), source, draftToSend, executed.event.summary, liveTarget);
 		return {
@@ -719,7 +768,7 @@ async function confirmDraft(
 			ok: false,
 			displayText: `I could not send that to ${liveTarget.label}. ${executed.event.summary}`,
 			proposedActions: [sendAction(draftToSend, source, failedEvent.createdAt, "failed", executed.event.summary, liveTarget)],
-			events: [confirmedEvent, failedEvent],
+			events: [confirmedEvent, executedEvent, failedEvent],
 			errors: [{ code: "send_failed", message: executed.event.summary, retryable: true }],
 		};
 	}
@@ -743,30 +792,87 @@ async function confirmDraft(
 		speech: source.presentation?.wantsSpeech ? `I have sent that to ${liveTarget.label}, sir.` : undefined,
 		displayText: `Sent draft to ${liveTarget.label}.`,
 		proposedActions: [sendAction(draftToSend, source, sentAt, "succeeded", undefined, liveTarget)],
-		events: [confirmedEvent, succeededEvent],
+		events: [confirmedEvent, executedEvent, succeededEvent],
 		nextStatePatch: { rememberTarget: liveTarget, rememberDraftId: null, rememberLastSentText: draftToSend.text },
+	};
+}
+
+async function confirmGenericPendingAction(
+	request: AlfredConfirmRequest,
+	state: DaemonState,
+	cmux: AlfredDaemonCmux,
+	now: () => Date,
+	pending: PendingAction | null,
+): Promise<AlfredHandleResponse> {
+	const createdAt = now().toISOString();
+	const requestId = request.requestId ?? nextId("req_confirm");
+	if (!pending) {
+		return pendingActionNotFoundResponse(requestId, createdAt, "confirm");
+	}
+	const source = request.source ?? pending.proposedBy;
+	if (pending.expiresAt <= createdAt) {
+		const approved = state.actions.approve(pending.id, source, pending.target);
+		const expiredEvent = approved.event ? recordActionEvent(state, approved.event) : null;
+		return {
+			requestId,
+			createdAt,
+			ok: false,
+			displayText: "That pending action has expired.",
+			proposedActions: [],
+			events: expiredEvent ? [expiredEvent] : [],
+			errors: [{ code: "confirmation_expired", message: "Pending action confirmation expired.", retryable: false }],
+		};
+	}
+	if (request.text !== undefined) {
+		return invalidRequestResponse(requestId, createdAt, "Text edits are only supported for pending cmux.sendText actions.");
+	}
+	const resolved = await resolveLivePendingTarget(pending, state, cmux, now, requestId, createdAt);
+	if (!resolved.ok) return resolved.response;
+	const approved = state.actions.approve(pending.id, source, resolved.target);
+	const approvedEvent = approved.event ? recordActionEvent(state, approved.event) : null;
+	if (!approved.ok || !approved.pending) {
+		const code = approved.pending?.status === "expired" ? "confirmation_expired" : "capability_denied";
+		return {
+			requestId,
+			createdAt,
+			ok: false,
+			displayText: approved.event?.summary ?? "Pending action could not be approved.",
+			proposedActions: [],
+			events: approvedEvent ? [approvedEvent] : [],
+			errors: [{ code, message: approved.event?.summary ?? "Pending action could not be approved.", retryable: false }],
+		};
+	}
+	const executed = await state.actions.execute(pending.id, {
+		source,
+		target: resolved.target,
+		requestId,
+		now,
+		cmux: cmux as never,
+	});
+	const executedEvent = recordActionEvent(state, executed.event);
+	return {
+		requestId,
+		createdAt: executed.event.createdAt,
+		ok: executed.ok,
+		displayText: executed.ok ? executed.event.summary : `Alfred could not execute ${pending.label}: ${executed.event.summary}`,
+		proposedActions: [],
+		events: [approvedEvent, executedEvent].filter((event): event is AlfredEvent => Boolean(event)),
+		errors: executed.ok ? undefined : [{ code: "unsupported_action", message: executed.event.summary, retryable: true }],
+		nextStatePatch: resolved.target ? { rememberTarget: resolved.target, rememberDraftId: null } : { rememberDraftId: null },
 	};
 }
 
 function cancelDraft(request: AlfredCancelRequest, state: DaemonState, now: () => Date): AlfredHandleResponse {
 	const createdAt = now().toISOString();
 	const requestId = request.requestId ?? nextId("req_cancel");
-	const pending = findPendingSendAction(state, request.pendingActionId ?? request.draftId);
-	const draft = pending ? draftFromPendingAction(pending) : null;
-	if (!pending || !draft) {
-		return {
-			requestId,
-			createdAt,
-			ok: false,
-			displayText: "There is no pending draft to cancel.",
-			proposedActions: [],
-			events: [],
-			errors: [{ code: "confirmation_expired", message: "No pending draft was found.", retryable: false }],
-		};
+	const pending = findPendingActionForCancel(state, request.pendingActionId, request.draftId);
+	if (!pending) {
+		return pendingActionNotFoundResponse(requestId, createdAt, "cancel");
 	}
-	const source = request.source ?? draft.createdBy;
+	const draft = draftFromPendingAction(pending);
+	const source = request.source ?? pending.proposedBy;
 	const cancelled = state.actions.cancel(pending.id, request.reason);
-	if (cancelled.event) recordActionEvent(state, cancelled.event);
+	const actionCancelledEvent = cancelled.event ? recordActionEvent(state, cancelled.event) : null;
 	if (!cancelled.ok) {
 		return {
 			requestId,
@@ -774,8 +880,19 @@ function cancelDraft(request: AlfredCancelRequest, state: DaemonState, now: () =
 			ok: false,
 			displayText: "That pending action can no longer be cancelled.",
 			proposedActions: [],
-			events: cancelled.event ? [cancelled.event] : [],
+			events: actionCancelledEvent ? [actionCancelledEvent] : [],
 			errors: [{ code: "confirmation_expired", message: "Pending action is no longer cancellable.", retryable: false }],
+		};
+	}
+	if (!draft) {
+		return {
+			requestId,
+			createdAt,
+			ok: true,
+			displayText: `Cancelled ${pending.label}.`,
+			proposedActions: [],
+			events: actionCancelledEvent ? [actionCancelledEvent] : [],
+			nextStatePatch: { rememberDraftId: null },
 		};
 	}
 	const event = pushEvent(state, {
@@ -806,7 +923,7 @@ function cancelDraft(request: AlfredCancelRequest, state: DaemonState, now: () =
 			draftId: draft.id,
 			reason: request.reason,
 		}],
-		events: [event],
+		events: [event, actionCancelledEvent].filter((item): item is AlfredEvent => Boolean(item)),
 		nextStatePatch: { rememberDraftId: null },
 	};
 }
@@ -1103,6 +1220,23 @@ function sameTarget(left: AlfredTarget, right: AlfredTarget): boolean {
 	return left.ref === right.ref || (left.surfaceRef !== undefined && left.surfaceRef === right.surfaceRef);
 }
 
+function resolveSendKeyIntent(inputText: string, targets: AlfredTarget[], currentWorkspaceRef?: AlfredRef): KeyIntent | null {
+	const normalized = inputText.trim();
+	const sendKey = normalized.match(/^(?:send\s+key|press)\s+(.+?)\s+(?:to|in|on)\s+(.+)$/i);
+	if (!sendKey?.[1] || !sendKey[2]) return null;
+	const key = normalizeKeyName(sendKey[1]);
+	if (!key) return null;
+	const scopedTargets = currentWorkspaceRef ? prioritizeCurrentWorkspace(targets, currentWorkspaceRef) : targets;
+	const matches = bestTargetMatches(scopedTargets, normalizeForMatch(sendKey[2]));
+	if (matches.length !== 1) return null;
+	const target = matches[0]!;
+	return { target, key, confidence: target.confidence ?? "unknown" };
+}
+
+function normalizeKeyName(value: string): string {
+	return value.trim().replace(/^the\s+/i, "").replace(/\s+/g, " ");
+}
+
 function resolveDraftIntent(inputText: string, targets: AlfredTarget[], currentWorkspaceRef?: AlfredRef): DraftIntent | null {
 	const normalized = inputText.trim();
 	const useSession = normalized.match(/^(?:use|talk to|work with|ask)\s+(?:my|the)?\s*(.+?)\s+(?:session|chat|tab)(?:\s+in\s+this\s+workspace)?\s+and\s+(.+)$/i);
@@ -1256,9 +1390,74 @@ function pushSendFailedEvent(
 	});
 }
 
-function findPendingSendAction(state: DaemonState, pendingActionId?: string): PendingAction | undefined {
-	const candidates = state.actions.listPending().filter((pending) => pending.actionMetaId === "cmux.sendText" && pending.status === "pending");
-	return pendingActionId ? candidates.find((pending) => pending.id === pendingActionId) : candidates[0];
+function findPendingActionForApproval(state: DaemonState, pendingActionId?: string, draftId?: string): PendingAction | null {
+	const candidates = state.actions.listPending().filter((pending) => pending.status === "pending");
+	if (pendingActionId) return candidates.find((pending) => pending.id === pendingActionId) ?? null;
+	if (draftId) return candidates.find((pending) => pending.id === draftId && pending.actionMetaId === "cmux.sendText") ?? null;
+	return candidates.find((pending) => pending.actionMetaId === "cmux.sendText") ?? null;
+}
+
+function findPendingActionForCancel(state: DaemonState, pendingActionId?: string, draftId?: string): PendingAction | null {
+	const candidates = state.actions.listPending().filter((pending) => pending.status === "pending" || pending.status === "approved");
+	if (pendingActionId) return candidates.find((pending) => pending.id === pendingActionId) ?? null;
+	if (draftId) return candidates.find((pending) => pending.id === draftId && pending.actionMetaId === "cmux.sendText") ?? null;
+	return candidates.find((pending) => pending.actionMetaId === "cmux.sendText") ?? null;
+}
+
+async function resolveLivePendingTarget(
+	pending: PendingAction,
+	state: DaemonState,
+	cmux: AlfredDaemonCmux,
+	now: () => Date,
+	requestId: string,
+	createdAt: IsoTimestamp,
+): Promise<{ ok: true; target?: AlfredTarget } | { ok: false; response: AlfredHandleResponse }> {
+	if (!pending.target) return { ok: true };
+	const targets = await cmux.listTargets();
+	if (!targets.ok) {
+		return { ok: false, response: cmuxUnavailableResponse(requestId, createdAt, targets.error.message) };
+	}
+	rememberTargets(state, targets.value, now().toISOString());
+	const liveTarget = findLiveTarget(targets.value, pending.target);
+	if (!liveTarget) {
+		pending.status = "failed";
+		const event = pushEvent(state, {
+			id: nextId("evt"),
+			kind: "action.failed",
+			createdAt,
+			requestId,
+			target: pending.target,
+			actionId: pending.id,
+			summary: `Failed ${pending.label}: target disappeared before approval.`,
+			redaction: { status: "not_needed" },
+			retention: defaultEventRetention(createdAt),
+		});
+		return {
+			ok: false,
+			response: {
+				requestId,
+				createdAt,
+				ok: false,
+				displayText: `I could not execute ${pending.label}; the target is no longer visible.`,
+				proposedActions: [],
+				events: [event],
+				errors: [{ code: "target_not_found", message: "Target disappeared before approval.", retryable: true }],
+			},
+		};
+	}
+	return { ok: true, target: liveTarget };
+}
+
+function pendingActionNotFoundResponse(requestId: string, createdAt: IsoTimestamp, operation: "confirm" | "cancel"): AlfredHandleResponse {
+	return {
+		requestId,
+		createdAt,
+		ok: false,
+		displayText: `There is no pending action to ${operation}.`,
+		proposedActions: [],
+		events: [],
+		errors: [{ code: "confirmation_expired", message: "No pending action was found.", retryable: false }],
+	};
 }
 
 function findLiveTarget(targets: readonly AlfredTarget[], target: AlfredTarget): AlfredTarget | undefined {

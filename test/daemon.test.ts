@@ -23,11 +23,13 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 		{ ...powerCodeTarget({ ref: "surface:55", label: "Codex Review", processKind: "codex", kind: "codex-session", surfaceRef: "surface:55" }) },
 	];
 	const sends: Array<{ kind: "surface" | "workspace"; ref: string; text: string }> = [];
+	const sentKeys: Array<{ surfaceRef: string; key: string }> = [];
 	const openedDiffs: Array<Record<string, unknown> | undefined> = [];
 	let targets = options.targets ?? defaultTargets;
 	return {
 		sends,
 		openedDiffs,
+		sentKeys,
 		setTargets(nextTargets: AlfredTarget[]) {
 			targets = nextTargets;
 		},
@@ -45,6 +47,10 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 			async sendTextToWorkspace(workspaceRef: string, text: string) {
 				sends.push({ kind: "workspace" as const, ref: workspaceRef, text });
 				return options.sendError ? { ok: false as const, error: options.sendError } : { ok: true as const, value: { workspaceRef } };
+			},
+			async sendKeyToSurface(surfaceRef: string, key: string) {
+				sentKeys.push({ surfaceRef, key });
+				return { ok: true as const, value: { surfaceRef, key } };
 			},
 			async openDiff(options?: Record<string, unknown>) {
 				openedDiffs.push(options);
@@ -259,6 +265,99 @@ test("POST /ask uses the shared Ask Alfred pipeline and creates PendingAction dr
 	});
 });
 
+test("POST /ask can create and /confirm can execute a generic send-key PendingAction", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const proposed = await postJson<{ ok: boolean; pendingAction?: { id: string; actionMetaId: string; status: string; preview: Record<string, unknown> }; pendingDraft?: AlfredDraft }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_send_key",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "send key enter to power code" },
+			context: { currentWorkspaceRef: "workspace:9" },
+		});
+
+		assert.equal(proposed.status, 200);
+		assert.equal(proposed.body.ok, true);
+		assert.equal(proposed.body.pendingAction?.actionMetaId, "cmux.sendKey");
+		assert.equal(proposed.body.pendingAction?.preview.key, "enter");
+		assert.equal(proposed.body.pendingDraft, undefined);
+		assert.deepEqual(mock.sentKeys, []);
+
+		const confirmed = await postJson<{ ok: boolean; events: Array<{ kind: string }> }>(baseUrl, token, "/confirm", {
+			requestId: "req_confirm_send_key",
+			pendingActionId: proposed.body.pendingAction?.id,
+			source: piCommandSource(),
+		});
+		assert.equal(confirmed.status, 200);
+		assert.equal(confirmed.body.ok, true);
+		assert.equal(confirmed.body.events.map((event) => event.kind).includes("action.approved"), true);
+		assert.equal(confirmed.body.events.map((event) => event.kind).includes("action.executed"), true);
+		assert.deepEqual(mock.sentKeys, [{ surfaceRef: "surface:42", key: "enter" }]);
+	});
+});
+
+test("/cancel accepts canonical pendingActionId for generic pending actions", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const proposed = await postJson<{ ok: boolean; pendingAction?: { id: string; actionMetaId: string } }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_send_key_cancel",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "press escape in power code" },
+			context: { currentWorkspaceRef: "workspace:9" },
+		});
+		assert.equal(proposed.status, 200);
+		assert.ok(proposed.body.pendingAction?.id);
+
+		const cancelled = await postJson<{ ok: boolean; events: Array<{ kind: string }> }>(baseUrl, token, "/cancel", {
+			requestId: "req_cancel_send_key",
+			pendingActionId: proposed.body.pendingAction.id,
+			source: piCommandSource(),
+			reason: "test cancel",
+		});
+
+		assert.equal(cancelled.status, 200);
+		assert.equal(cancelled.body.ok, true);
+		assert.equal(cancelled.body.events[0]?.kind, "action.cancelled");
+		assert.deepEqual(mock.sentKeys, []);
+	});
+});
+
+test("/confirm reports expired generic pending actions before target liveness failures", async () => {
+	let current = new Date("2026-06-19T22:00:00.000Z");
+	const mock = createMockCmux();
+	const daemon = createAlfredDaemon(
+		{ host: "127.0.0.1", port: 0, authToken: "test-token", storageDir: null },
+		{ cmux: mock.cmux, now: () => current },
+	);
+	const started = await daemon.start();
+	const baseUrl = `http://${started.host}:${started.port}`;
+	try {
+		const proposed = await postJson<{ ok: boolean; pendingAction?: { id: string } }>(baseUrl, started.authToken, "/ask", {
+			requestId: "req_ask_send_key_expired",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "send key enter to power code" },
+			context: { currentWorkspaceRef: "workspace:9" },
+		});
+		assert.ok(proposed.body.pendingAction?.id);
+		current = new Date("2026-06-19T22:06:00.000Z");
+		mock.setTargets([]);
+
+		const confirmed = await postJson<{ ok: boolean; errors: Array<{ code: string }>; events: Array<{ kind: string }> }>(baseUrl, started.authToken, "/confirm", {
+			requestId: "req_confirm_send_key_expired",
+			pendingActionId: proposed.body.pendingAction.id,
+			source: piCommandSource(),
+		});
+
+		assert.equal(confirmed.status, 400);
+		assert.equal(confirmed.body.ok, false);
+		assert.equal(confirmed.body.errors[0]?.code, "confirmation_expired");
+		assert.equal(confirmed.body.events[0]?.kind, "action.expired");
+		assert.deepEqual(mock.sentKeys, []);
+	} finally {
+		await daemon.stop();
+	}
+});
+
 test("Powerco named target request creates a pending draft without sending", async () => {
 	await withDaemon(async (baseUrl, token, mock) => {
 		const { status, body } = await createPowercoDraft(baseUrl, token);
@@ -306,6 +405,74 @@ test("/confirm can edit a PendingAction-backed draft before sending", async () =
 		assert.deepEqual(stateBody.pendingDrafts, []);
 		assert.equal(stateBody.events.some((event) => event.kind === "action.edited"), true);
 		assert.equal(stateBody.events.some((event) => event.kind === "action.executed"), true);
+	});
+});
+
+test("/confirm accepts canonical pendingActionId for sends", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const pendingAction = (await createPowercoDraft(baseUrl, token)).body.pendingAction;
+		assert.ok(pendingAction);
+
+		const confirmed = await postJson<{ ok: boolean; events: Array<{ kind: string }> }>(baseUrl, token, "/confirm", {
+			requestId: "req_confirm_pending_action_id",
+			pendingActionId: pendingAction.id,
+			source: piCommandSource(),
+		});
+
+		assert.equal(confirmed.status, 200);
+		assert.equal(confirmed.body.ok, true);
+		assert.equal(confirmed.body.events.some((event) => event.kind === "action.executed"), true);
+		assert.deepEqual(mock.sends, [{ kind: "surface", ref: "surface:42", text: "try to implement ways to fix it" }]);
+	});
+});
+
+test("/confirm fails closed when a pending action has expired", async () => {
+	let current = new Date("2026-06-19T22:00:00.000Z");
+	const mock = createMockCmux();
+	const daemon = createAlfredDaemon(
+		{ host: "127.0.0.1", port: 0, authToken: "test-token", storageDir: null },
+		{ cmux: mock.cmux, now: () => current },
+	);
+	const started = await daemon.start();
+	const baseUrl = `http://${started.host}:${started.port}`;
+	try {
+		const pendingAction = (await createPowercoDraft(baseUrl, started.authToken)).body.pendingAction;
+		assert.ok(pendingAction);
+		current = new Date("2026-06-19T22:06:00.000Z");
+
+		const confirmed = await postJson<{ ok: boolean; errors: Array<{ code: string }>; events: Array<{ kind: string }> }>(baseUrl, started.authToken, "/confirm", {
+			requestId: "req_confirm_expired",
+			pendingActionId: pendingAction.id,
+			source: piCommandSource(),
+		});
+
+		assert.equal(confirmed.status, 400);
+		assert.equal(confirmed.body.ok, false);
+		assert.equal(confirmed.body.errors[0]?.code, "confirmation_expired");
+		assert.equal(confirmed.body.events[0]?.kind, "action.expired");
+		assert.deepEqual(mock.sends, []);
+	} finally {
+		await daemon.stop();
+	}
+});
+
+test("/confirm revalidates target capabilities before approval", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const pendingAction = (await createPowercoDraft(baseUrl, token)).body.pendingAction;
+		assert.ok(pendingAction);
+		mock.setTargets([powerCodeTarget({ capabilities: ["surface.read"] })]);
+
+		const confirmed = await postJson<{ ok: boolean; errors: Array<{ code: string; message: string }> }>(baseUrl, token, "/confirm", {
+			requestId: "req_confirm_capability_changed",
+			pendingActionId: pendingAction.id,
+			source: piCommandSource(),
+		});
+
+		assert.equal(confirmed.status, 400);
+		assert.equal(confirmed.body.ok, false);
+		assert.equal(confirmed.body.errors[0]?.code, "capability_denied");
+		assert.match(confirmed.body.errors[0]?.message ?? "", /does not support surface\.send/);
+		assert.deepEqual(mock.sends, []);
 	});
 });
 
@@ -883,6 +1050,9 @@ test("dashboard renderer includes local operator UI without query-token patterns
 	assert.match(html, /api\('\/ask'/);
 	assert.match(html, /api\('\/confirm'/);
 	assert.match(html, /api\('\/cancel'/);
+	assert.match(html, /renderPendingActions\(state\?\.pendingActions/);
+	assert.match(html, /risk/);
+	assert.match(html, /Preview payload/);
 	assert.equal(html.includes("test-token"), false);
 	assert.equal(html.includes("URLSearchParams"), false);
 	assert.equal(html.includes("location.search"), false);
@@ -906,7 +1076,9 @@ test("dashboard route renders local UI without exposing daemon state", async () 
 		assert.match(html, /\/surfaces/);
 		assert.match(html, /pending action/i);
 		assert.match(html, /Confirm send/);
+		assert.match(html, /Approve action/);
 		assert.match(html, /Cancel draft/);
+		assert.match(html, /Cancel action/);
 		assert.match(html, /x-alfred-auth/);
 		assert.equal(html.includes(token), false);
 		assert.equal(html.includes("URLSearchParams"), false);
@@ -959,6 +1131,7 @@ test("daemon reports structured errors for bad JSON and unavailable cmux", async
 				async readSurface() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async sendTextToSurface() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async sendTextToWorkspace() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
+				async sendKeyToSurface() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async openDiff() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 			},
 		},
