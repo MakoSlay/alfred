@@ -487,6 +487,44 @@ test("autonomous loop send failures do not claim success", async () => {
 	}
 });
 
+test("loop start rejects malformed authenticated bodies with structured errors", async () => {
+	await withDaemon(async (baseUrl, token) => {
+		const malformed = await postJson<{ ok: boolean; errors: Array<{ code: string }> }>(baseUrl, token, "/loops/start", {
+			requestId: "req_loop_start_malformed",
+		});
+
+		assert.equal(malformed.status, 400);
+		assert.equal(malformed.body.ok, false);
+		assert.equal(malformed.body.errors[0]?.code, "invalid_request");
+	});
+});
+
+test("loop poll fails closed when decision provider throws", async () => {
+	await withDaemon(async (baseUrl, token) => {
+		const source = piCommandSource();
+		const started = await postJson<{ activeLoop?: { id: string } }>(baseUrl, token, "/loops/start", {
+			requestId: "req_loop_start_decider_throw",
+			source,
+			targetRef: "surface:42",
+			goal: { value: "Do work.", redaction: { status: "not_needed" } },
+			maxTurns: 4,
+			pollIntervalMs: 3_000,
+			allowedCapabilities: source.capabilities,
+		});
+		const polled = await postJson<{ ok: boolean; activeLoop?: { status: string }; events: Array<{ kind: string; summary: string }> }>(baseUrl, token, "/loops/poll", {
+			requestId: "req_loop_poll_decider_throw",
+			loopId: started.body.activeLoop?.id,
+			source,
+		});
+
+		assert.equal(polled.status, 200);
+		assert.equal(polled.body.ok, true);
+		assert.equal(polled.body.activeLoop?.status, "needs_user");
+		assert.equal(polled.body.events[0]?.kind, "loop.needs_user");
+		assert.match(polled.body.events[0]?.summary ?? "", /decision provider failed/i);
+	}, { loopDecider: async () => { throw new Error("planner exploded"); } });
+});
+
 test("loop start and poll fail closed for missing capabilities or targets", async () => {
 	await withDaemon(async (baseUrl, token, mock) => {
 		const denied = await postJson<{ ok: boolean; errors: Array<{ code: string }> }>(baseUrl, token, "/loops/start", {

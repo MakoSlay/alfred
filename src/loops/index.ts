@@ -85,27 +85,31 @@ export function createAlfredLoopManager(dependencies: AlfredLoopManagerDependenc
 
 	async function start(request: AlfredLoopStartRequest): Promise<AlfredHandleResponse> {
 		const createdAt = now().toISOString();
-		const effectiveSource = applyAllowedCapabilities(request.source, request.allowedCapabilities);
+		const requestId = typeof request.requestId === "string" && request.requestId.trim() ? request.requestId : nextId("req_loop_start");
+		if (!isSourceLike(request.source) || typeof request.targetRef !== "string" || !request.targetRef.trim() || !isRedactedTextLike(request.goal)) {
+			return errorResponse(requestId, createdAt, "Loop start requires source, targetRef, and goal.", { code: "invalid_request", message: "Loop start requires source, targetRef, and goal.", retryable: false });
+		}
+		const effectiveSource = applyAllowedCapabilities(request.source, Array.isArray(request.allowedCapabilities) ? request.allowedCapabilities : request.source.capabilities);
 		if (!sourceHasCapabilities(effectiveSource, ["loop.manage"])) {
-			return errorResponse(request.requestId, createdAt, "Source lacks loop.manage capability.", { code: "capability_denied", message: "Source lacks loop.manage capability.", retryable: false });
+			return errorResponse(requestId, createdAt, "Source lacks loop.manage capability.", { code: "capability_denied", message: "Source lacks loop.manage capability.", retryable: false });
 		}
 		if (activeLoop && ["running", "waiting"].includes(activeLoop.summary.status)) {
-			return errorResponse(request.requestId, createdAt, `A loop is already running for ${activeLoop.summary.target.label}.`, { code: "loop_already_running", message: "Only one active loop is supported in this foundation.", retryable: false });
+			return errorResponse(requestId, createdAt, `A loop is already running for ${activeLoop.summary.target.label}.`, { code: "loop_already_running", message: "Only one active loop is supported in this foundation.", retryable: false });
 		}
 		const targetResult = await findTarget(dependencies.cmux, request.targetRef);
 		if (!targetResult.ok) {
-			return errorResponse(request.requestId, createdAt, `Loop target is unavailable: ${targetResult.error.message}`, { code: targetResult.error.code === "target_not_found" ? "target_not_found" : "cmux_unavailable", message: targetResult.error.message, retryable: targetResult.error.code !== "target_not_found" });
+			return errorResponse(requestId, createdAt, `Loop target is unavailable: ${targetResult.error.message}`, { code: targetResult.error.code === "target_not_found" ? "target_not_found" : "cmux_unavailable", message: targetResult.error.message, retryable: targetResult.error.code !== "target_not_found" });
 		}
 		const observationCapabilities = requiredObservationCapabilities(targetResult.value);
 		if (!sourceHasCapabilities(effectiveSource, observationCapabilities)) {
-			return errorResponse(request.requestId, createdAt, `Source lacks ${observationCapabilities.join(", ")} capability.`, { code: "capability_denied", message: `Source lacks ${observationCapabilities.join(", ")} capability.`, retryable: false });
+			return errorResponse(requestId, createdAt, `Source lacks ${observationCapabilities.join(", ")} capability.`, { code: "capability_denied", message: `Source lacks ${observationCapabilities.join(", ")} capability.`, retryable: false });
 		}
 		if (!targetHasCapabilities(targetResult.value, observationCapabilities)) {
-			return errorResponse(request.requestId, createdAt, `Target ${targetResult.value.label} does not support ${observationCapabilities.join(", ")}.`, { code: "capability_denied", message: `Target does not support ${observationCapabilities.join(", ")}.`, retryable: false });
+			return errorResponse(requestId, createdAt, `Target ${targetResult.value.label} does not support ${observationCapabilities.join(", ")}.`, { code: "capability_denied", message: `Target does not support ${observationCapabilities.join(", ")}.`, retryable: false });
 		}
 		const goalValue = request.goal.value.trim();
 		if (!goalValue) {
-			return errorResponse(request.requestId, createdAt, "Loop goal is required.", { code: "invalid_request", message: "Loop goal is required.", retryable: false });
+			return errorResponse(requestId, createdAt, "Loop goal is required.", { code: "invalid_request", message: "Loop goal is required.", retryable: false });
 		}
 		const loopId = nextId("loop");
 		const summary: AlfredLoopSummary = {
@@ -142,7 +146,7 @@ export function createAlfredLoopManager(dependencies: AlfredLoopManagerDependenc
 			id: nextId("evt"),
 			kind: "loop.started" as const,
 			createdAt,
-			requestId: request.requestId,
+			requestId,
 			source: { kind: effectiveSource.kind, id: effectiveSource.id, label: effectiveSource.label },
 			target: summary.target,
 			actionId: action.id,
@@ -152,7 +156,7 @@ export function createAlfredLoopManager(dependencies: AlfredLoopManagerDependenc
 			retention: defaultEventRetention(createdAt),
 		};
 		return {
-			requestId: request.requestId,
+			requestId,
 			createdAt,
 			ok: true,
 			displayText: `Loop started for ${summary.target.label}.`,
@@ -199,7 +203,17 @@ export function createAlfredLoopManager(dependencies: AlfredLoopManagerDependenc
 		}
 		loop.summary.target = targetResult.value;
 		const transcript = await readTargetTranscript(dependencies.cmux, targetResult.value);
-		const decision = dependencies.decide ? await dependencies.decide(loop, transcript) : { kind: "wait", reason: "No loop decision provider is configured yet." } satisfies AlfredLoopDecision;
+		let decision: AlfredLoopDecision;
+		try {
+			decision = dependencies.decide ? await dependencies.decide(loop, transcript) : { kind: "wait", reason: "No loop decision provider is configured yet." };
+		} catch {
+			loop.summary.status = "needs_user";
+			loop.summary.lastActivityAt = now().toISOString();
+			scheduler.cancel(loopId);
+			decision = { kind: "needs_user", summary: "Loop decision provider failed." };
+			loop.lastDecision = decision;
+			return decision;
+		}
 		loop.lastDecision = normalizeLoopDecision(decision);
 		loop.summary.lastActivityAt = now().toISOString();
 		if (loop.lastDecision.kind === "wait") {
@@ -224,11 +238,14 @@ export function createAlfredLoopManager(dependencies: AlfredLoopManagerDependenc
 		if (!loop || loop.summary.id !== loopId) {
 			return errorResponse(requestId, createdAt, "There is no active loop to stop.", { code: "loop_not_found", message: "Loop not found.", retryable: false });
 		}
+		const source = options.source ?? loop.source;
+		if (!sourceHasCapabilities(source, ["loop.manage"])) {
+			return errorResponse(requestId, createdAt, "Source lacks loop.manage capability.", { code: "capability_denied", message: "Source lacks loop.manage capability.", retryable: false });
+		}
 		scheduler.cancel(loopId);
 		loop.summary.status = "stopped";
 		loop.summary.lastActivityAt = createdAt;
 		activeLoop = null;
-		const source = options.source ?? loop.source;
 		const action: AlfredAction = {
 			id: nextId("act"),
 			kind: "loop.stop",
@@ -311,6 +328,22 @@ function requiredObservationCapabilities(target: AlfredTarget): AlfredCapability
 
 function targetHasCapabilities(target: AlfredTarget, capabilities: readonly AlfredCapability[]): boolean {
 	return capabilities.every((capability) => target.capabilities.includes(capability));
+}
+
+function isSourceLike(value: unknown): value is AlfredSource {
+	if (!value || typeof value !== "object") return false;
+	const source = value as Partial<AlfredSource>;
+	return typeof source.kind === "string"
+		&& typeof source.id === "string"
+		&& typeof source.trustedLocalOnly === "boolean"
+		&& Array.isArray(source.capabilities)
+		&& source.capabilities.every((capability) => typeof capability === "string");
+}
+
+function isRedactedTextLike(value: unknown): value is RedactedText {
+	if (!value || typeof value !== "object") return false;
+	const text = value as Partial<RedactedText>;
+	return typeof text.value === "string" && Boolean(text.redaction) && typeof text.redaction === "object";
 }
 
 function normalizeLoopDecision(decision: AlfredLoopDecision): AlfredLoopDecision {
