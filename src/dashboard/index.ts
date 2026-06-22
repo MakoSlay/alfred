@@ -266,7 +266,7 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
         const text = document.createElement('textarea');
         const redactionStatus = draft?.text?.redaction?.status;
         const editableText = Boolean(pending.editable ?? true) && redactionStatus !== 'contains_sensitive' && redactionStatus !== 'redacted';
-        text.value = editableText ? (draft?.text?.value || pending.input?.text || '') : '';
+        text.value = editableText ? (draft?.text?.value || '') : '';
         text.placeholder = editableText ? '' : '[redacted by Alfred; edit disabled]';
         text.disabled = !editableText;
         text.setAttribute('aria-label', 'Editable pending action text for ' + target);
@@ -275,7 +275,7 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
       } else {
         const previewLabel = line('meta', 'Preview payload');
         const preview = document.createElement('pre');
-        preview.textContent = JSON.stringify(pending.preview || pending.input || {}, null, 2);
+        preview.textContent = pending.preview ? JSON.stringify(pending.preview, null, 2) : 'Preview unavailable.';
         item.append(previewLabel, preview);
       }
 

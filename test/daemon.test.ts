@@ -462,7 +462,7 @@ test("/confirm revalidates target capabilities before approval", async () => {
 		assert.ok(pendingAction);
 		mock.setTargets([powerCodeTarget({ capabilities: ["surface.read"] })]);
 
-		const confirmed = await postJson<{ ok: boolean; errors: Array<{ code: string; message: string }> }>(baseUrl, token, "/confirm", {
+		const confirmed = await postJson<{ ok: boolean; errors: Array<{ code: string; message: string }>; events: Array<{ kind: string }> }>(baseUrl, token, "/confirm", {
 			requestId: "req_confirm_capability_changed",
 			pendingActionId: pendingAction.id,
 			source: piCommandSource(),
@@ -471,7 +471,8 @@ test("/confirm revalidates target capabilities before approval", async () => {
 		assert.equal(confirmed.status, 400);
 		assert.equal(confirmed.body.ok, false);
 		assert.equal(confirmed.body.errors[0]?.code, "capability_denied");
-		assert.match(confirmed.body.errors[0]?.message ?? "", /does not support surface\.send/);
+		assert.match(confirmed.body.errors[0]?.message ?? "", /does not support(?: capability:)? surface\.send/);
+		assert.equal(confirmed.body.events[0]?.kind, "action.denied");
 		assert.deepEqual(mock.sends, []);
 	});
 });

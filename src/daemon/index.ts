@@ -707,13 +707,6 @@ async function confirmSendPendingAction(
 		}
 		draftToSend = draftFromPendingAction(edited.pending) ?? draftToSend;
 	}
-	const requiredCapabilities = requiredSendCapabilities(liveTarget);
-	if (!sourceHasCapabilities(source, requiredCapabilities)) {
-		return capabilityDeniedResponse(requestId, createdAt, `Source lacks ${requiredCapabilities.join(", ")} capability.`);
-	}
-	if (!targetHasCapabilities(liveTarget, requiredCapabilities)) {
-		return capabilityDeniedResponse(requestId, createdAt, `Target ${liveTarget.label} does not support ${requiredCapabilities.join(", ")}.`);
-	}
 	const approved = state.actions.approve(pending.id, source, liveTarget);
 	const approvedEvent = approved.event ? recordActionEvent(state, approved.event) : null;
 	if (!approved.ok || !approved.pending) {
