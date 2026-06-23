@@ -676,7 +676,7 @@ export function registerBuiltinActions(registry: ActionRegistry): void {
 	});
 
 	// ─── cmux.readNotifications (safe) ───
-	registry.register<void, { notifications: unknown[] }>({
+	registry.register<{ filter?: "all" | "unread"; countOnly?: boolean }, { notifications: unknown[] }>({
 		metadata: {
 			id: "cmux.readNotifications",
 			description: "Read cmux notifications",
@@ -685,11 +685,15 @@ export function registerBuiltinActions(registry: ActionRegistry): void {
 			requiredTargetCapabilities: [],
 			auditCategory: "cmux-notification",
 		},
-		validateInput(): string[] | null {
+		validateInput(input: unknown): string[] | null {
+			if (input === undefined) return null;
+			if (!isRecord(input)) return ["Input must be an object."];
+			if (input.filter !== undefined && input.filter !== "all" && input.filter !== "unread") return ["Input.filter must be all or unread."];
+			if (input.countOnly !== undefined && typeof input.countOnly !== "boolean") return ["Input.countOnly must be boolean."];
 			return null;
 		},
-		buildPreview() {
-			return { type: "cmux.readNotifications" };
+		buildPreview(input: { filter?: "all" | "unread"; countOnly?: boolean }) {
+			return { type: "cmux.readNotifications", filter: input.filter ?? "all", countOnly: input.countOnly === true };
 		},
 		async handler(_input, context: ActionHandlerContext) {
 			const result = await context.cmux.listNotifications();

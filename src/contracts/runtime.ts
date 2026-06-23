@@ -51,6 +51,25 @@ export interface AlfredTarget {
 	metadata?: Record<string, string | number | boolean | null>;
 }
 
+export type AlfredTargetAliasScope = "workspace" | "global";
+
+export interface AlfredTargetAlias {
+	id: AlfredId;
+	alias: string;
+	normalizedAlias: string;
+	scope: AlfredTargetAliasScope;
+	targetRef: AlfredRef;
+	targetKind: AlfredTargetKind;
+	targetLabel: string;
+	workspaceRef?: AlfredRef;
+	workspaceLabel?: string;
+	surfaceRef?: AlfredRef;
+	createdAt: IsoTimestamp;
+	updatedAt: IsoTimestamp;
+	lastSeenAt?: IsoTimestamp;
+	createdBy: Pick<AlfredSource, "kind" | "id" | "label">;
+}
+
 export interface AlfredHandleRequest {
 	requestId: AlfredId;
 	createdAt: IsoTimestamp;

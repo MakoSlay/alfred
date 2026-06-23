@@ -15,6 +15,8 @@ import type {
 	AlfredSendAction,
 	AlfredSource,
 	AlfredTarget,
+	AlfredTargetAlias,
+	AlfredTargetAliasScope,
 	IsoTimestamp,
 	PendingAction,
 	RedactedText,
@@ -28,7 +30,7 @@ import { buildPlannerInput, plannerInputSummary, validatePlannerResult, type Alf
 import { createAlfredLoopManager, type AlfredLoopDecision, type AlfredLoopManager, type AlfredLoopRuntimeState, type AlfredLoopScheduler, type AlfredLoopStartRequest } from "../loops/index.ts";
 import { createJsonFileStorage, defaultAlfredStorageDir, type AlfredStorageAdapter } from "../storage/index.ts";
 import { createActionRegistry, registerBuiltinActions, type ActionRegistry } from "../actions/index.ts";
-import { requiredSendCapabilities, resolvePlannerDraftIntent, routeAskBeforeWorld, routeAskWithWorld, targetHasCapabilities, type DraftIntent, type KeyIntent } from "../router/index.ts";
+import { normalizeForMatch, requiredSendCapabilities, resolvePlannerDraftIntent, resolveTargetPhrase, routeAskBeforeWorld, routeAskWithWorld, targetHasCapabilities, type DraftIntent, type KeyIntent } from "../router/index.ts";
 
 export interface AlfredDaemonConfig {
 	readonly host: string;
@@ -46,11 +48,12 @@ export interface AlfredDaemonStateSnapshot {
 	pendingDrafts: AlfredDraft[];
 	activeLoop: AlfredLoopSummary | null;
 	recentTargets: AlfredTarget[];
+	targetAliases: AlfredTargetAlias[];
 	events: AlfredEvent[];
 	storageWarnings?: string[];
 }
 
-type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace" | "sendKeyToSurface" | "openDiff" | "openMarkdown" | "openUrl" | "listNotifications">;
+type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace" | "sendKeyToSurface" | "openDiff" | "openMarkdown" | "openUrl" | "openBrowserSurface" | "listNotifications">;
 
 export interface AlfredDaemonDependencies {
 	cmux?: AlfredDaemonCmux;
@@ -102,8 +105,26 @@ export interface AlfredLoopStopRequest {
 	reason?: string;
 }
 
+export interface AlfredAliasUpsertRequest {
+	requestId?: string;
+	alias?: string;
+	targetRef?: AlfredRef;
+	scope?: AlfredTargetAliasScope;
+	workspaceRef?: AlfredRef;
+	source?: AlfredSource;
+}
+
+export interface AlfredAliasForgetRequest {
+	requestId?: string;
+	alias?: string;
+	scope?: AlfredTargetAliasScope;
+	workspaceRef?: AlfredRef;
+	source?: AlfredSource;
+}
+
 interface DaemonState {
 	recentTargets: AlfredTarget[];
+	targetAliases: AlfredTargetAlias[];
 	events: AlfredEvent[];
 	actions: ActionRegistry;
 	storage?: AlfredStorageAdapter;
@@ -135,7 +156,7 @@ export function createAlfredDaemon(
 	const now = dependencies.now ?? (() => new Date());
 	const actions = createActionRegistry({ now, nextId, defaultTtlMs: DEFAULT_DRAFT_TTL_MS });
 	registerBuiltinActions(actions);
-	const state: DaemonState = { recentTargets: [], events: [], actions, storage, storageWarnings: [] };
+	const state: DaemonState = { recentTargets: [], targetAliases: [], events: [], actions, storage, storageWarnings: [] };
 	const planner = dependencies.planner;
 	const loopManager = dependencies.loopManager ?? createAlfredLoopManager({ cmux, now, nextId, decide: dependencies.loopDecider, scheduler: dependencies.loopScheduler });
 	const server = http.createServer((request, response) => {
@@ -233,6 +254,33 @@ async function handleDaemonRequest(
 		return;
 	}
 
+	if (request.method === "GET" && url.pathname === "/targets/aliases") {
+		writeJson(response, 200, { ok: true, aliases: state.targetAliases });
+		return;
+	}
+
+	if (request.method === "POST" && url.pathname === "/targets/aliases") {
+		const body = await readJsonBody<AlfredAliasUpsertRequest>(request, config.maxBodyBytes);
+		if (!body.ok) {
+			writeJson(response, 400, { ok: false, error: { code: "invalid_request", message: body.error, retryable: false } });
+			return;
+		}
+		const result = await handleAliasUpsert(body.value, state, cmux, now);
+		writeJson(response, result.ok ? 200 : 400, result);
+		return;
+	}
+
+	if (request.method === "POST" && url.pathname === "/targets/aliases/forget") {
+		const body = await readJsonBody<AlfredAliasForgetRequest>(request, config.maxBodyBytes);
+		if (!body.ok) {
+			writeJson(response, 400, { ok: false, error: { code: "invalid_request", message: body.error, retryable: false } });
+			return;
+		}
+		const result = handleAliasForget(body.value, state, now);
+		writeJson(response, result.ok ? 200 : 400, result);
+		return;
+	}
+
 	if (request.method === "POST" && (url.pathname === "/ask" || url.pathname === "/handle")) {
 		const body = await readJsonBody<AlfredHandleRequest>(request, config.maxBodyBytes);
 		if (!body.ok) {
@@ -321,6 +369,27 @@ async function handleDaemonRequest(
 	writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Route not found", retryable: false } });
 }
 
+async function handleAliasUpsert(request: AlfredAliasUpsertRequest, state: DaemonState, cmux: AlfredDaemonCmux, now: () => Date): Promise<{ ok: boolean; alias?: AlfredTargetAlias; error?: AlfredError }> {
+	const createdAt = now().toISOString();
+	const alias = request.alias?.trim();
+	if (!alias || !request.targetRef) return { ok: false, error: { code: "invalid_request", message: "alias and targetRef are required.", retryable: false } };
+	const targets = await cmux.listTargets();
+	if (!targets.ok) return { ok: false, error: { code: "cmux_unavailable", message: targets.error.message, retryable: true } };
+	rememberTargets(state, targets.value, createdAt);
+	const target = targets.value.find((candidate) => candidate.ref === request.targetRef || candidate.surfaceRef === request.targetRef || candidate.workspaceRef === request.targetRef);
+	if (!target) return { ok: false, error: { code: "target_not_found", message: "targetRef did not match a visible target.", retryable: true } };
+	const source = request.source ?? { kind: "system", id: "alias-api", trustedLocalOnly: true, capabilities: [] };
+	const saved = upsertTargetAlias(state, alias, request.scope ?? "workspace", target, source, createdAt, request.workspaceRef);
+	return { ok: true, alias: saved };
+}
+
+function handleAliasForget(request: AlfredAliasForgetRequest, state: DaemonState, now: () => Date): { ok: boolean; removed?: number; error?: AlfredError } {
+	const alias = request.alias?.trim();
+	if (!alias) return { ok: false, error: { code: "invalid_request", message: "alias is required.", retryable: false } };
+	const removed = forgetTargetAlias(state, alias, request.scope, request.workspaceRef, now().toISOString());
+	return { ok: true, removed };
+}
+
 async function handleRequest(
 	request: AlfredHandleRequest,
 	state: DaemonState,
@@ -333,9 +402,6 @@ async function handleRequest(
 		return invalidRequestResponse(request.requestId, now().toISOString(), "input.text is required");
 	}
 	const effectiveSource = applyAllowedCapabilities(request.source, request.policy?.allowedCapabilities);
-	if (!sourceHasCapabilities(effectiveSource, ["world.read"])) {
-		return capabilityDeniedResponse(request.requestId, now().toISOString(), "Missing world.read capability");
-	}
 	const preWorldRoute = routeAskBeforeWorld(inputText);
 	if (preWorldRoute.kind === "confirm") {
 		return await confirmDraft({ requestId: request.requestId, source: effectiveSource }, state, cmux, now);
@@ -343,13 +409,16 @@ async function handleRequest(
 	if (preWorldRoute.kind === "cancel") {
 		return cancelDraft({ requestId: request.requestId, source: effectiveSource, reason: inputText }, state, now);
 	}
+	if (!sourceHasCapabilities(effectiveSource, ["world.read"])) {
+		return capabilityDeniedResponse(request.requestId, now().toISOString(), "Missing world.read capability");
+	}
 
 	const targets = await cmux.listTargets();
 	if (!targets.ok) {
 		return cmuxUnavailableResponse(request.requestId, now().toISOString(), targets.error.message);
 	}
 	rememberTargets(state, targets.value, now().toISOString());
-	const route = routeAskWithWorld({ inputText, targets: targets.value, currentWorkspaceRef: request.context?.currentWorkspaceRef });
+	const route = routeAskWithWorld({ inputText, targets: targets.value, currentWorkspaceRef: request.context?.currentWorkspaceRef, aliases: state.targetAliases, recentTargets: state.recentTargets });
 	if (route.kind === "list_targets") {
 		return createTargetsAnswerResponse(request, effectiveSource, targets.value, state, now);
 	}
@@ -358,6 +427,18 @@ async function handleRequest(
 	}
 	if (route.kind === "pending_actions") {
 		return createPendingActionsAnswerResponse(request, effectiveSource, state, now);
+	}
+	if (route.kind === "list_aliases") {
+		return createAliasListResponse(request, effectiveSource, state, now);
+	}
+	if (route.kind === "remember_alias") {
+		return createAliasRememberedResponse(request, effectiveSource, route, targets.value, state, now, request.context?.currentWorkspaceRef);
+	}
+	if (route.kind === "forget_alias") {
+		return createAliasForgottenResponse(request, effectiveSource, route.alias, route.scope, state, now, request.context?.currentWorkspaceRef);
+	}
+	if (route.kind === "clarification") {
+		return createClarificationResponse(request, effectiveSource, route, state, now);
 	}
 	if (route.kind === "safe_action") {
 		return await executeSafeAction(request, effectiveSource, state, cmux, now, route.actionId, route.input);
@@ -377,7 +458,7 @@ async function handleRequest(
 			plannerResult = validatePlannerResult({ ok: false, errors: [{ code: "llm_unavailable", message: "Planner failed before returning a validated action.", retryable: true }] }, plannerInputSummary(plannerInput.inputText, plannerInput.maxInputChars));
 		}
 		if (plannerResult.ok && plannerResult.intent?.kind === "draft_message") {
-			const resolved = resolvePlannerDraftIntent(plannerResult.intent, targets.value, request.context?.currentWorkspaceRef);
+			const resolved = resolvePlannerDraftIntent(plannerResult.intent, targets.value, request.context?.currentWorkspaceRef, state.targetAliases, state.recentTargets);
 			if (resolved.ok && resolved.intent) {
 				return createDraftResponse(request, effectiveSource, resolved.intent, state, now);
 			}
@@ -469,6 +550,90 @@ function createPendingActionsAnswerResponse(
 	};
 }
 
+function createAliasListResponse(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	state: DaemonState,
+	now: () => Date,
+): AlfredHandleResponse {
+	const createdAt = now().toISOString();
+	const lines = state.targetAliases.slice(0, 20).map((alias) => `- ${alias.alias} (${alias.scope}) → ${alias.targetLabel} (${alias.targetRef})`);
+	const displayText = lines.length > 0 ? `Target aliases:\n${lines.join("\n")}` : "No target aliases are remembered yet.";
+	const event = pushWorldObservedEvent(state, request.requestId, source, createdAt, `Listed ${state.targetAliases.length} target alias${state.targetAliases.length === 1 ? "" : "es"}.`, { aliasCount: state.targetAliases.length });
+	return { requestId: request.requestId, createdAt, ok: true, displayText, proposedActions: [], events: [event] };
+}
+
+function createAliasRememberedResponse(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	route: { alias: string; scope: AlfredTargetAliasScope; targetPhrase?: string },
+	targets: readonly AlfredTarget[],
+	state: DaemonState,
+	now: () => Date,
+	currentWorkspaceRef?: AlfredRef,
+): AlfredHandleResponse {
+	const createdAt = now().toISOString();
+	const alias = route.alias.trim();
+	if (!alias) return invalidRequestResponse(request.requestId, createdAt, "alias is required");
+	let target: AlfredTarget | undefined;
+	if (route.targetPhrase) {
+		const resolved = resolveTargetPhrase(route.targetPhrase, targets, { currentWorkspaceRef, aliases: state.targetAliases, recentTargets: state.recentTargets });
+		if (resolved.kind !== "resolved") {
+			return createClarificationResponse(request, source, {
+				code: resolved.kind === "ambiguous" ? "target_ambiguous" : "target_not_found",
+				prompt: resolved.kind === "ambiguous" ? `Which target did you mean by "${route.targetPhrase}"?` : `I couldn't find a live target named "${route.targetPhrase}".`,
+				candidates: resolved.kind === "ambiguous" ? resolved.candidates : [],
+			}, state, now);
+		}
+		target = resolved.target;
+	} else {
+		target = targets.find((candidate) => candidate.selected || candidate.current || candidate.ref === currentWorkspaceRef || candidate.workspaceRef === currentWorkspaceRef) ?? targets[0];
+	}
+	if (!target) return createClarificationResponse(request, source, { code: "target_not_found", prompt: "I need a visible target before I can remember an alias.", candidates: [] }, state, now);
+	const remembered = upsertTargetAlias(state, alias, route.scope, target, source, createdAt, currentWorkspaceRef);
+	const event = pushWorldObservedEvent(state, request.requestId, source, createdAt, `Remembered alias ${remembered.alias} for ${target.label}.`, { alias: remembered.alias, scope: remembered.scope, targetRef: remembered.targetRef });
+	return { requestId: request.requestId, createdAt, ok: true, displayText: `Remembered ${remembered.scope} alias "${remembered.alias}" for ${target.label}.`, proposedActions: [], events: [event], nextStatePatch: { rememberTarget: target } };
+}
+
+function createAliasForgottenResponse(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	alias: string,
+	scope: AlfredTargetAliasScope | undefined,
+	state: DaemonState,
+	now: () => Date,
+	currentWorkspaceRef?: AlfredRef,
+): AlfredHandleResponse {
+	const createdAt = now().toISOString();
+	const removed = forgetTargetAlias(state, alias, scope, currentWorkspaceRef, createdAt);
+	const event = pushWorldObservedEvent(state, request.requestId, source, createdAt, `Forgot ${removed} target alias${removed === 1 ? "" : "es"}.`, { alias, removed });
+	return { requestId: request.requestId, createdAt, ok: true, displayText: removed > 0 ? `Forgot ${removed} alias${removed === 1 ? "" : "es"} named "${alias}".` : `No alias named "${alias}" was remembered.`, proposedActions: [], events: [event] };
+}
+
+function createClarificationResponse(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	route: { code: "target_ambiguous" | "target_not_found" | "unsupported_action"; prompt: string; candidates: readonly AlfredTarget[] },
+	state: DaemonState,
+	now: () => Date,
+): AlfredHandleResponse {
+	const createdAt = now().toISOString();
+	const candidates = route.candidates.slice(0, 8);
+	const candidateText = candidates.length > 0 ? `\n${candidates.map((target) => `- ${target.label} (${target.ref})`).join("\n")}` : "";
+	const event = pushEvent(state, {
+		id: nextId("evt"),
+		kind: "fallback.used",
+		createdAt,
+		requestId: request.requestId,
+		source: { kind: source.kind, id: source.id, label: source.label },
+		summary: `Asked for clarification: ${route.code}.`,
+		data: { code: route.code, candidateRefs: candidates.map((target) => target.ref) },
+		redaction: { status: "not_needed" },
+		retention: defaultEventRetention(createdAt),
+	});
+	return { requestId: request.requestId, createdAt, ok: true, displayText: `${route.prompt}${candidateText}`, proposedActions: [], events: [event], errors: route.code === "unsupported_action" ? [{ code: "unsupported_action", message: route.prompt, retryable: false }] : undefined };
+}
+
 function pushWorldObservedEvent(
 	state: DaemonState,
 	requestId: AlfredId,
@@ -524,7 +689,7 @@ async function executeSafeAction(
 	});
 	const executedEvent = recordActionEvent(state, executed.event);
 	const displayText = executed.ok && actionId === "cmux.readNotifications"
-		? formatNotificationsDisplay(executed.pending.result?.notifications)
+		? formatNotificationsDisplay(executed.pending.result?.notifications, input)
 		: executed.ok ? executed.event.summary : `Alfred could not execute ${actionId}: ${executed.event.summary}`;
 	return {
 		requestId: request.requestId,
@@ -537,16 +702,26 @@ async function executeSafeAction(
 	};
 }
 
-function formatNotificationsDisplay(value: unknown): string {
-	const notifications = Array.isArray(value) ? value.slice(0, 12) : [];
-	if (notifications.length === 0) return "No cmux notifications are visible right now.";
+function formatNotificationsDisplay(value: unknown, input: Record<string, unknown> = {}): string {
+	const allNotifications = Array.isArray(value) ? value : [];
+	const wantsUnread = input.filter === "unread";
+	const notifications = (wantsUnread ? allNotifications.filter((notification) => {
+		const record = typeof notification === "object" && notification !== null ? notification as Record<string, unknown> : {};
+		return record.isRead !== true;
+	}) : allNotifications).slice(0, 12);
+	if (input.countOnly === true) {
+		const count = notifications.length;
+		const label = wantsUnread ? "unread notification" : "notification";
+		return `There ${count === 1 ? "is" : "are"} ${count} ${label}${count === 1 ? "" : "s"}.`;
+	}
+	if (notifications.length === 0) return wantsUnread ? "There are no unread cmux notifications right now." : "No cmux notifications are visible right now.";
 	const lines = notifications.map((notification) => {
 		const record = typeof notification === "object" && notification !== null ? notification as Record<string, unknown> : {};
 		const title = typeof record.title === "string" && record.title.trim() ? record.title : String(record.id ?? "notification");
 		const state = record.isRead === true ? "read" : "unread";
 		return `- ${title} (${state})`;
 	});
-	return `Notifications:\n${lines.join("\n")}`;
+	return `${wantsUnread ? "Unread notifications" : "Notifications"}:\n${lines.join("\n")}`;
 }
 
 function createNoActionResponse(
@@ -1429,6 +1604,7 @@ function loadPersistedState(state: DaemonState, nowIso: IsoTimestamp): void {
 	const loaded = state.storage.load(nowIso);
 	state.events = loaded.events;
 	state.recentTargets = loaded.recentTargets;
+	state.targetAliases = loaded.targetAliases;
 	state.storageWarnings = loaded.warnings.slice(-20);
 	recordStorageWarning(state, state.storage.prune(nowIso));
 }
@@ -1436,6 +1612,45 @@ function loadPersistedState(state: DaemonState, nowIso: IsoTimestamp): void {
 function rememberTargets(state: DaemonState, targets: readonly AlfredTarget[], updatedAt: IsoTimestamp): void {
 	state.recentTargets = [...targets];
 	recordStorageWarning(state, state.storage?.saveTargets(targets, updatedAt));
+}
+
+function upsertTargetAlias(state: DaemonState, alias: string, scope: AlfredTargetAliasScope, target: AlfredTarget, source: AlfredSource, updatedAt: IsoTimestamp, currentWorkspaceRef?: AlfredRef): AlfredTargetAlias {
+	const normalizedAlias = normalizeForMatch(alias);
+	const workspaceRef = scope === "workspace" ? target.workspaceRef ?? (target.kind === "cmux-workspace" ? target.ref : currentWorkspaceRef) : undefined;
+	const existing = state.targetAliases.find((item) => item.normalizedAlias === normalizedAlias && item.scope === scope && (scope === "global" || item.workspaceRef === workspaceRef));
+	const record: AlfredTargetAlias = {
+		id: existing?.id ?? nextId("alias"),
+		alias: alias.trim(),
+		normalizedAlias,
+		scope,
+		targetRef: target.ref,
+		targetKind: target.kind,
+		targetLabel: target.label,
+		workspaceRef,
+		workspaceLabel: target.workspaceLabel,
+		surfaceRef: target.surfaceRef,
+		createdAt: existing?.createdAt ?? updatedAt,
+		updatedAt,
+		lastSeenAt: updatedAt,
+		createdBy: { kind: source.kind, id: source.id, label: source.label },
+	};
+	state.targetAliases = existing ? state.targetAliases.map((item) => item.id === existing.id ? record : item) : [...state.targetAliases, record];
+	recordStorageWarning(state, state.storage?.saveTargetAliases(state.targetAliases, updatedAt));
+	return record;
+}
+
+function forgetTargetAlias(state: DaemonState, alias: string, scope: AlfredTargetAliasScope | undefined, currentWorkspaceRef: AlfredRef | undefined, updatedAt: IsoTimestamp): number {
+	const normalizedAlias = normalizeForMatch(alias);
+	const before = state.targetAliases.length;
+	state.targetAliases = state.targetAliases.filter((item) => {
+		if (item.normalizedAlias !== normalizedAlias) return true;
+		if (scope && item.scope !== scope) return true;
+		if ((scope ?? item.scope) === "workspace" && currentWorkspaceRef && item.workspaceRef !== currentWorkspaceRef) return true;
+		return false;
+	});
+	const removed = before - state.targetAliases.length;
+	if (removed > 0) recordStorageWarning(state, state.storage?.saveTargetAliases(state.targetAliases, updatedAt));
+	return removed;
 }
 
 function recordStorageWarning(state: DaemonState, warning: string | null | undefined): void {
@@ -1577,6 +1792,7 @@ function snapshotState(state: DaemonState, loopManager?: AlfredLoopManager, nowI
 		pendingDrafts: pendingDrafts(state, nowIso),
 		activeLoop: loopManager?.status() ?? null,
 		recentTargets: state.recentTargets,
+		targetAliases: state.targetAliases,
 		events: state.events,
 		storageWarnings: state.storageWarnings.length > 0 ? state.storageWarnings : undefined,
 	};

@@ -28,6 +28,7 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 	const openedDiffs: Array<Record<string, unknown> | undefined> = [];
 	const openedMarkdown: Array<{ path: string; options?: Record<string, unknown> }> = [];
 	const openedUrls: Array<{ url: string; options?: Record<string, unknown> }> = [];
+	const openedBrowsers: Array<{ url?: string; options?: Record<string, unknown> }> = [];
 	const notifications = [{ id: "notif:1", title: "Build finished", isRead: false, createdAt: "2026-06-19T21:59:00.000Z" }];
 	let targets = options.targets ?? defaultTargets;
 	return {
@@ -35,6 +36,7 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 		openedDiffs,
 		openedMarkdown,
 		openedUrls,
+		openedBrowsers,
 		notifications,
 		sentKeys,
 		setTargets(nextTargets: AlfredTarget[]) {
@@ -70,6 +72,10 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 			async openUrl(url: string, options?: Record<string, unknown>) {
 				openedUrls.push({ url, options });
 				return { ok: true as const, value: { url, opened: true } };
+			},
+			async openBrowserSurface(url?: string, options?: Record<string, unknown>) {
+				openedBrowsers.push({ url, options });
+				return { ok: true as const, value: { opened: true } };
 			},
 			async listNotifications() {
 				return { ok: true as const, value: notifications };
@@ -1342,6 +1348,7 @@ test("daemon reports structured errors for bad JSON and unavailable cmux", async
 				async openDiff() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async openMarkdown() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async openUrl() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
+				async openBrowserSurface() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async listNotifications() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 			},
 		},
@@ -1366,4 +1373,102 @@ test("daemon reports structured errors for bad JSON and unavailable cmux", async
 	} finally {
 		await daemon.stop();
 	}
+});
+
+test("natural-language confirm and cancel route before world lookup", async () => {
+	const daemon = createAlfredDaemon(
+		{ host: "127.0.0.1", port: 0, authToken: "test-token", storageDir: null },
+		{
+			cmux: {
+				async listTargets() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
+				async readSurface() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
+				async sendTextToSurface() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
+				async sendTextToWorkspace() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
+				async sendKeyToSurface() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
+				async openDiff() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
+				async openMarkdown() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
+				async openUrl() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
+				async openBrowserSurface() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
+				async listNotifications() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
+			},
+		},
+	);
+	const started = await daemon.start();
+	try {
+		const baseUrl = `http://${started.host}:${started.port}`;
+		const response = await postJson<{ ok: boolean; errors?: Array<{ code: string }> }>(baseUrl, started.authToken, "/ask", {
+			requestId: "req_confirm_preworld",
+			createdAt: "2026-06-19T22:00:00.000Z",
+			source: piCommandSource({ capabilities: [] }),
+			input: { text: "confirm" },
+		});
+		assert.equal(response.status, 400);
+		assert.equal(response.body.errors?.[0]?.code, "confirmation_expired");
+	} finally {
+		await daemon.stop();
+	}
+});
+
+test("POST /ask executes browser open and unread notification answers", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		mock.notifications.push({ id: "notif:2", title: "Already read", isRead: true, createdAt: "2026-06-19T21:58:00.000Z" });
+		const browser = await postJson<{ ok: boolean }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_browser",
+			createdAt: "2026-06-19T22:00:00.000Z",
+			source: piCommandSource(),
+			input: { text: "open browser https://example.test/app" },
+		});
+		assert.equal(browser.status, 200);
+		assert.equal(browser.body.ok, true);
+		assert.deepEqual(mock.openedBrowsers.map((entry) => entry.url), ["https://example.test/app"]);
+
+		const count = await postJson<{ ok: boolean; displayText: string }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_unread_count",
+			createdAt: "2026-06-19T22:00:01.000Z",
+			source: piCommandSource(),
+			input: { text: "how many unread notifications" },
+		});
+		assert.equal(count.status, 200);
+		assert.match(count.body.displayText, /There is 1 unread notification\./);
+	});
+});
+
+test("target aliases can be managed through Ask and API and resolve drafts", async () => {
+	await withDaemon(async (baseUrl, token) => {
+		const remembered = await postJson<{ ok: boolean; displayText: string }>(baseUrl, token, "/ask", {
+			requestId: "req_alias_remember",
+			createdAt: "2026-06-19T22:00:00.000Z",
+			source: piCommandSource(),
+			input: { text: "remember power code as main pi" },
+			context: { currentWorkspaceRef: "workspace:9" },
+		});
+		assert.equal(remembered.status, 200);
+		assert.match(remembered.body.displayText, /Remembered workspace alias "main pi"/);
+
+		const draft = await postJson<{ ok: boolean; pendingAction?: { actionMetaId: string }; pendingDraft?: AlfredDraft }>(baseUrl, token, "/ask", {
+			requestId: "req_alias_draft",
+			createdAt: "2026-06-19T22:00:01.000Z",
+			source: piCommandSource(),
+			input: { text: "tell main pi run tests" },
+			context: { currentWorkspaceRef: "workspace:9" },
+		});
+		assert.equal(draft.status, 200);
+		assert.equal(draft.body.pendingAction?.actionMetaId, "cmux.sendText");
+		assert.equal(draft.body.pendingDraft?.target.ref, "surface:42");
+
+		const api = await postJson<{ ok: boolean; alias: { alias: string } }>(baseUrl, token, "/targets/aliases", {
+			alias: "review lane",
+			targetRef: "surface:55",
+			scope: "global",
+			source: piCommandSource(),
+		});
+		assert.equal(api.status, 200);
+		assert.equal(api.body.alias.alias, "review lane");
+		const list = await fetch(`${baseUrl}/targets/aliases`, { headers: authHeaders(token) });
+		const listBody = await list.json() as { aliases: Array<{ alias: string }> };
+		assert.equal(listBody.aliases.some((alias) => alias.alias === "review lane"), true);
+		const forgotten = await postJson<{ ok: boolean; removed: number }>(baseUrl, token, "/targets/aliases/forget", { alias: "review lane", scope: "global" });
+		assert.equal(forgotten.status, 200);
+		assert.equal(forgotten.body.removed, 1);
+	});
 });

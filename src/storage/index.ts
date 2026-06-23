@@ -1,7 +1,7 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { AlfredEvent, AlfredEventKind, AlfredSource, AlfredTarget, IsoTimestamp, RedactionMetadata, RetentionMetadata } from "../contracts/runtime.ts";
+import type { AlfredEvent, AlfredEventKind, AlfredSource, AlfredTarget, AlfredTargetAlias, IsoTimestamp, RedactionMetadata, RetentionMetadata } from "../contracts/runtime.ts";
 
 export const ALFRED_STORAGE_VERSION = 1;
 export const DEFAULT_STORAGE_MAX_EVENTS = 100;
@@ -9,6 +9,7 @@ export const DEFAULT_STORAGE_MAX_EVENTS = 100;
 export interface AlfredPersistedDaemonState {
 	events: AlfredEvent[];
 	recentTargets: AlfredTarget[];
+	targetAliases: AlfredTargetAlias[];
 	warnings: string[];
 }
 
@@ -16,10 +17,12 @@ export interface AlfredStorageAdapter {
 	readonly appDir: string;
 	readonly eventsPath: string;
 	readonly targetsPath: string;
+	readonly aliasesPath: string;
 	readonly metadataPath: string;
 	load(nowIso: IsoTimestamp): AlfredPersistedDaemonState;
 	appendEvent(event: AlfredEvent): string | null;
 	saveTargets(targets: readonly AlfredTarget[], updatedAt: IsoTimestamp): string | null;
+	saveTargetAliases(aliases: readonly AlfredTargetAlias[], updatedAt: IsoTimestamp): string | null;
 	prune(nowIso: IsoTimestamp): string | null;
 }
 
@@ -34,12 +37,19 @@ interface StoredTargetsFile {
 	targets: AlfredTarget[];
 }
 
+interface StoredAliasesFile {
+	version: number;
+	updatedAt: IsoTimestamp;
+	aliases: AlfredTargetAlias[];
+}
+
 interface StoredMetadataFile {
 	version: number;
 	updatedAt: IsoTimestamp;
 	retention: {
 		events: "short-and-manual-only";
 		pendingDrafts: "session-only";
+		targetAliases: "manual";
 		loopRuntimeState: "session-only";
 		transcripts: "never-by-default";
 	};
@@ -51,6 +61,14 @@ const EVENT_KINDS: readonly AlfredEventKind[] = [
 	"draft.created",
 	"draft.confirmed",
 	"draft.cancelled",
+	"action.proposed",
+	"action.approved",
+	"action.edited",
+	"action.cancelled",
+	"action.denied",
+	"action.expired",
+	"action.executed",
+	"action.failed",
 	"send.started",
 	"send.succeeded",
 	"send.failed",
@@ -74,6 +92,7 @@ export function createJsonFileStorage(options: JsonFileStorageOptions = {}): Alf
 	const maxEvents = clampMaxEvents(options.maxEvents ?? DEFAULT_STORAGE_MAX_EVENTS);
 	const eventsPath = join(appDir, "events.jsonl");
 	const targetsPath = join(appDir, "targets.json");
+	const aliasesPath = join(appDir, "aliases.json");
 	const metadataPath = join(appDir, "metadata.json");
 
 	function ensureStorageDir(updatedAt: IsoTimestamp): string | null {
@@ -98,6 +117,7 @@ export function createJsonFileStorage(options: JsonFileStorageOptions = {}): Alf
 			retention: {
 				events: "short-and-manual-only",
 				pendingDrafts: "session-only",
+				targetAliases: "manual",
 				loopRuntimeState: "session-only",
 				transcripts: "never-by-default",
 			},
@@ -108,18 +128,21 @@ export function createJsonFileStorage(options: JsonFileStorageOptions = {}): Alf
 	function load(nowIso: IsoTimestamp): AlfredPersistedDaemonState {
 		const warnings: string[] = [];
 		const initWarning = ensureStorageDir(nowIso);
-		if (initWarning) return { events: [], recentTargets: [], warnings: [initWarning] };
+		if (initWarning) return { events: [], recentTargets: [], targetAliases: [], warnings: [initWarning] };
 
 		const eventLoad = loadEvents(nowIso);
 		warnings.push(...eventLoad.warnings);
 		const targetLoad = loadTargets();
 		warnings.push(...targetLoad.warnings);
+		const aliasLoad = loadAliases();
+		warnings.push(...aliasLoad.warnings);
 		const pruneWarning = rewriteEvents(eventLoad.events, nowIso);
 		if (pruneWarning) warnings.push(pruneWarning);
 
 		return {
 			events: newestFirst(eventLoad.events).slice(0, maxEvents),
 			recentTargets: targetLoad.targets,
+			targetAliases: aliasLoad.aliases,
 			warnings,
 		};
 	}
@@ -152,6 +175,22 @@ export function createJsonFileStorage(options: JsonFileStorageOptions = {}): Alf
 			return null;
 		} catch (error) {
 			return warningFor("save targets", error);
+		}
+	}
+
+	function saveTargetAliases(aliases: readonly AlfredTargetAlias[], updatedAt: IsoTimestamp): string | null {
+		const initWarning = ensureStorageDir(updatedAt);
+		if (initWarning) return initWarning;
+		const payload: StoredAliasesFile = {
+			version: ALFRED_STORAGE_VERSION,
+			updatedAt,
+			aliases: aliases.map(sanitizeTargetAliasForStorage),
+		};
+		try {
+			writeAtomicJson(aliasesPath, payload);
+			return null;
+		} catch (error) {
+			return warningFor("save target aliases", error);
 		}
 	}
 
@@ -203,6 +242,19 @@ export function createJsonFileStorage(options: JsonFileStorageOptions = {}): Alf
 		}
 	}
 
+	function loadAliases(): { aliases: AlfredTargetAlias[]; warnings: string[] } {
+		if (!existsSync(aliasesPath)) return { aliases: [], warnings: [] };
+		try {
+			const parsed = JSON.parse(readFileSync(aliasesPath, "utf8")) as unknown;
+			if (!isRecord(parsed) || parsed.version !== ALFRED_STORAGE_VERSION || !Array.isArray(parsed.aliases)) {
+				return { aliases: [], warnings: ["Skipped invalid stored aliases file."] };
+			}
+			return { aliases: parsed.aliases.map(parseStoredTargetAlias).filter((alias): alias is AlfredTargetAlias => Boolean(alias)), warnings: [] };
+		} catch {
+			return { aliases: [], warnings: ["Skipped corrupt stored aliases file."] };
+		}
+	}
+
 	function rewriteEvents(events: readonly AlfredEvent[], updatedAt: IsoTimestamp): string | null {
 		const initWarning = ensureStorageDir(updatedAt);
 		if (initWarning) return initWarning;
@@ -221,7 +273,7 @@ export function createJsonFileStorage(options: JsonFileStorageOptions = {}): Alf
 		}
 	}
 
-	return { appDir, eventsPath, targetsPath, metadataPath, load, appendEvent, saveTargets, prune };
+	return { appDir, eventsPath, targetsPath, aliasesPath, metadataPath, load, appendEvent, saveTargets, saveTargetAliases, prune };
 }
 
 export function sanitizeEventForStorage(event: AlfredEvent): AlfredEvent | null {
@@ -254,6 +306,25 @@ export function sanitizeTargetForStorage(target: AlfredTarget): AlfredTarget {
 		selected: target.selected,
 		confidence: target.confidence,
 		capabilities: [...target.capabilities],
+	};
+}
+
+export function sanitizeTargetAliasForStorage(alias: AlfredTargetAlias): AlfredTargetAlias {
+	return {
+		id: alias.id,
+		alias: alias.alias,
+		normalizedAlias: alias.normalizedAlias,
+		scope: alias.scope,
+		targetRef: alias.targetRef,
+		targetKind: alias.targetKind,
+		targetLabel: alias.targetLabel,
+		workspaceRef: alias.workspaceRef,
+		workspaceLabel: alias.workspaceLabel,
+		surfaceRef: alias.surfaceRef,
+		createdAt: alias.createdAt,
+		updatedAt: alias.updatedAt,
+		lastSeenAt: alias.lastSeenAt,
+		createdBy: sanitizeEventSource(alias.createdBy),
 	};
 }
 
@@ -296,6 +367,30 @@ function parseStoredTarget(value: unknown): AlfredTarget | undefined {
 		selected: typeof value.selected === "boolean" ? value.selected : undefined,
 		confidence: typeof value.confidence === "string" ? value.confidence as AlfredTarget["confidence"] : undefined,
 		capabilities,
+	});
+}
+
+function parseStoredTargetAlias(value: unknown): AlfredTargetAlias | undefined {
+	if (!isRecord(value)) return undefined;
+	if (typeof value.id !== "string" || typeof value.alias !== "string" || typeof value.normalizedAlias !== "string" || (value.scope !== "workspace" && value.scope !== "global")) return undefined;
+	if (typeof value.targetRef !== "string" || typeof value.targetKind !== "string" || typeof value.targetLabel !== "string" || typeof value.createdAt !== "string" || typeof value.updatedAt !== "string") return undefined;
+	const createdBy = parseStoredSource(value.createdBy);
+	if (!createdBy) return undefined;
+	return sanitizeTargetAliasForStorage({
+		id: value.id,
+		alias: value.alias,
+		normalizedAlias: value.normalizedAlias,
+		scope: value.scope,
+		targetRef: value.targetRef,
+		targetKind: value.targetKind as AlfredTargetAlias["targetKind"],
+		targetLabel: value.targetLabel,
+		workspaceRef: typeof value.workspaceRef === "string" ? value.workspaceRef : undefined,
+		workspaceLabel: typeof value.workspaceLabel === "string" ? value.workspaceLabel : undefined,
+		surfaceRef: typeof value.surfaceRef === "string" ? value.surfaceRef : undefined,
+		createdAt: value.createdAt,
+		updatedAt: value.updatedAt,
+		lastSeenAt: typeof value.lastSeenAt === "string" ? value.lastSeenAt : undefined,
+		createdBy,
 	});
 }
 

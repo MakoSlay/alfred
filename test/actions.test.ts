@@ -746,13 +746,15 @@ test("validateInput for cmux.sendText rejects non-object input", () => {
 	assert.notEqual(errors, null);
 });
 
-test("validateInput for cmux.readNotifications accepts any input (no params)", () => {
+test("validateInput for cmux.readNotifications accepts optional unread/count input", () => {
 	const registry = createRegistry();
 	const action = registry.get("cmux.readNotifications");
 	assert.ok(action);
 
-	const errors = action?.validateInput(undefined);
-	assert.equal(errors, null);
+	assert.equal(action?.validateInput(undefined), null);
+	assert.equal(action?.validateInput({ filter: "unread", countOnly: true }), null);
+	assert.notEqual(action?.validateInput({ filter: "dismissed" }), null);
+	assert.deepEqual(action?.buildPreview({ filter: "unread", countOnly: true }), { type: "cmux.readNotifications", filter: "unread", countOnly: true });
 });
 
 test("validateInput for cmux.openMarkdown requires path", () => {

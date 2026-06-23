@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { AlfredEvent } from "../src/contracts/runtime.ts";
+import type { AlfredEvent, AlfredTargetAlias } from "../src/contracts/runtime.ts";
 import { createJsonFileStorage, sanitizeEventForStorage } from "../src/storage/index.ts";
 import { cliSource, powerCodeTarget } from "../src/testing/fixtures.ts";
 
@@ -46,6 +46,38 @@ test("json file storage round-trips redacted audit events and sanitized target m
 		assert.equal(eventLog.includes("sk-secret-should-not-persist"), false);
 		assert.equal(eventLog.includes("do-not-store-this"), false);
 		assert.equal(targetsJson.includes("do-not-store-this"), false);
+	} finally {
+		await rm(appDir, { recursive: true, force: true });
+	}
+});
+
+test("json file storage persists sanitized target aliases and action audit events", async () => {
+	const appDir = await mkdtemp(join(tmpdir(), "alfred-storage-"));
+	try {
+		const storage = createJsonFileStorage({ appDir, maxEvents: 10 });
+		const alias: AlfredTargetAlias = {
+			id: "alias_backend",
+			alias: "backend",
+			normalizedAlias: "backend",
+			scope: "workspace",
+			targetRef: "surface:42",
+			targetKind: "pi-chat",
+			targetLabel: "π - Power Code",
+			workspaceRef: "workspace:9",
+			workspaceLabel: "Powerco",
+			surfaceRef: "surface:42",
+			createdAt: "2026-06-19T22:00:00.000Z",
+			updatedAt: "2026-06-19T22:00:00.000Z",
+			createdBy: { kind: "cli", id: "alfred-cli", label: "CLI" },
+		};
+		assert.equal(storage.saveTargetAliases([alias], alias.updatedAt), null);
+		assert.equal(storage.appendEvent(auditEvent({ id: "evt_action", kind: "action.executed", summary: "Executed safe action." })), null);
+		const loaded = storage.load("2026-06-19T22:01:00.000Z");
+		assert.equal(loaded.targetAliases.length, 1);
+		assert.equal(loaded.targetAliases[0]?.alias, "backend");
+		assert.equal(loaded.events.some((event) => event.kind === "action.executed"), true);
+		const aliasesJson = await readFile(storage.aliasesPath, "utf8");
+		assert.equal(aliasesJson.includes("backend"), true);
 	} finally {
 		await rm(appDir, { recursive: true, force: true });
 	}

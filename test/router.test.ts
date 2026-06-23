@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AlfredTarget } from "../src/contracts/runtime.ts";
+import type { AlfredTarget, AlfredTargetAlias } from "../src/contracts/runtime.ts";
 import { isSafeRelativeMarkdownPath, resolvePlannerDraftIntent, routeAskBeforeWorld, routeAskWithWorld } from "../src/router/index.ts";
 
 function target(overrides: Partial<AlfredTarget> = {}): AlfredTarget {
@@ -46,7 +46,9 @@ test("router enforces safe relative markdown paths", () => {
 		"docs/plain.txt",
 	]) {
 		assert.equal(isSafeRelativeMarkdownPath(path), false, path);
-		assert.deepEqual(routeAskWithWorld({ inputText: `open markdown ${path}`, targets: [target()] }), { kind: "no_match" });
+		const route = routeAskWithWorld({ inputText: `open markdown ${path}`, targets: [target()] });
+		assert.equal(route.kind, "clarification");
+		assert.equal(route.kind === "clarification" ? route.code : undefined, "unsupported_action");
 	}
 	assert.deepEqual(routeAskWithWorld({ inputText: "open markdown docs/plans/PLAN.md", targets: [target()] }), { kind: "safe_action", actionId: "cmux.openMarkdown", input: { path: "docs/plans/PLAN.md" } });
 });
@@ -56,7 +58,9 @@ test("router resolves send-key and draft intents without guessing ambiguous targ
 		target({ ref: "surface:a", surfaceRef: "surface:a", workspaceRef: "workspace:a" }),
 		target({ ref: "surface:b", surfaceRef: "surface:b", workspaceRef: "workspace:b" }),
 	];
-	assert.deepEqual(routeAskWithWorld({ inputText: "send key enter to power code", targets }), { kind: "no_match" });
+	const ambiguous = routeAskWithWorld({ inputText: "send key enter to power code", targets });
+	assert.equal(ambiguous.kind, "clarification");
+	assert.equal(ambiguous.kind === "clarification" ? ambiguous.code : undefined, "target_ambiguous");
 
 	const sendKey = routeAskWithWorld({ inputText: "send key enter to power code", targets, currentWorkspaceRef: "workspace:a" });
 	assert.equal(sendKey.kind, "send_key");
@@ -77,4 +81,35 @@ test("planner draft resolution rejects mismatched target ref and name", () => {
 	const resolved = resolvePlannerDraftIntent({ kind: "draft_message", targetRef: "surface:a", targetName: "Docs Bot", message: "hello" }, targets);
 	assert.equal(resolved.ok, false);
 	assert.equal(resolved.error?.code, "target_ambiguous");
+});
+
+test("router resolves aliases and detects stale aliases", () => {
+	const targets = [
+		target({ ref: "surface:local", surfaceRef: "surface:local", workspaceRef: "workspace:local", label: "Local Bot" }),
+		target({ ref: "surface:global", surfaceRef: "surface:global", workspaceRef: "workspace:global", label: "Global Bot" }),
+	];
+	const aliases: AlfredTargetAlias[] = [
+		{ id: "alias_1", alias: "bot", normalizedAlias: "bot", scope: "global", targetRef: "surface:global", targetKind: "cmux-surface", targetLabel: "Global Bot", createdAt: "2026-06-19T22:00:00.000Z", updatedAt: "2026-06-19T22:00:00.000Z", createdBy: { kind: "cli", id: "cli" } },
+		{ id: "alias_2", alias: "bot", normalizedAlias: "bot", scope: "workspace", targetRef: "surface:local", targetKind: "cmux-surface", targetLabel: "Local Bot", workspaceRef: "workspace:local", createdAt: "2026-06-19T22:00:00.000Z", updatedAt: "2026-06-19T22:00:00.000Z", createdBy: { kind: "cli", id: "cli" } },
+		{ id: "alias_3", alias: "stale", normalizedAlias: "stale", scope: "global", targetRef: "surface:missing", targetKind: "cmux-surface", targetLabel: "Missing", createdAt: "2026-06-19T22:00:00.000Z", updatedAt: "2026-06-19T22:00:00.000Z", createdBy: { kind: "cli", id: "cli" } },
+	];
+	const local = routeAskWithWorld({ inputText: "tell bot hello", targets, aliases, currentWorkspaceRef: "workspace:local" });
+	assert.equal(local.kind, "draft_message");
+	assert.equal(local.kind === "draft_message" ? local.intent.target.ref : undefined, "surface:local");
+	const global = routeAskWithWorld({ inputText: "tell bot hello", targets, aliases, currentWorkspaceRef: "workspace:other" });
+	assert.equal(global.kind, "draft_message");
+	assert.equal(global.kind === "draft_message" ? global.intent.target.ref : undefined, "surface:global");
+	const stale = routeAskWithWorld({ inputText: "tell stale hello", targets, aliases });
+	assert.equal(stale.kind, "clarification");
+	assert.equal(stale.kind === "clarification" ? stale.code : undefined, "target_not_found");
+});
+
+test("router classifies browser, unread notification, and alias management intents", () => {
+	const targets = [target()];
+	assert.deepEqual(routeAskWithWorld({ inputText: "open browser https://example.test/path", targets }), { kind: "safe_action", actionId: "cmux.openBrowserSurface", input: { url: "https://example.test/path" } });
+	assert.deepEqual(routeAskWithWorld({ inputText: "how many unread notifications", targets }), { kind: "safe_action", actionId: "cmux.readNotifications", input: { filter: "unread", countOnly: true } });
+	assert.deepEqual(routeAskWithWorld({ inputText: "show unread notifications", targets }), { kind: "safe_action", actionId: "cmux.readNotifications", input: { filter: "unread" } });
+	assert.deepEqual(routeAskWithWorld({ inputText: "remember power code as main pi", targets }), { kind: "remember_alias", targetPhrase: "power code", alias: "main pi", scope: "workspace" });
+	assert.deepEqual(routeAskWithWorld({ inputText: "list aliases", targets }), { kind: "list_aliases" });
+	assert.deepEqual(routeAskWithWorld({ inputText: "forget alias main pi", targets }), { kind: "forget_alias", alias: "main pi", scope: undefined });
 });
