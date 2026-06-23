@@ -432,7 +432,7 @@ async function handleRequest(
 		return createAliasListResponse(request, effectiveSource, state, now);
 	}
 	if (route.kind === "remember_alias") {
-		return createAliasRememberedResponse(request, effectiveSource, route, targets.value, state, now, request.context?.currentWorkspaceRef);
+		return createAliasRememberedResponse(request, effectiveSource, route, targets.value, state, now, request.context?.currentWorkspaceRef, request.context?.currentSurfaceRef);
 	}
 	if (route.kind === "forget_alias") {
 		return createAliasForgottenResponse(request, effectiveSource, route.alias, route.scope, state, now, request.context?.currentWorkspaceRef);
@@ -571,6 +571,7 @@ function createAliasRememberedResponse(
 	state: DaemonState,
 	now: () => Date,
 	currentWorkspaceRef?: AlfredRef,
+	currentSurfaceRef?: AlfredRef,
 ): AlfredHandleResponse {
 	const createdAt = now().toISOString();
 	const alias = route.alias.trim();
@@ -587,12 +588,29 @@ function createAliasRememberedResponse(
 		}
 		target = resolved.target;
 	} else {
-		target = targets.find((candidate) => candidate.selected || candidate.current || candidate.ref === currentWorkspaceRef || candidate.workspaceRef === currentWorkspaceRef) ?? targets[0];
+		target = selectCurrentAliasTarget(targets, currentWorkspaceRef, currentSurfaceRef);
 	}
-	if (!target) return createClarificationResponse(request, source, { code: "target_not_found", prompt: "I need a visible target before I can remember an alias.", candidates: [] }, state, now);
+	if (!target) return createClarificationResponse(request, source, { code: "target_not_found", prompt: "I need a visible send-capable target before I can remember an alias.", candidates: [] }, state, now);
 	const remembered = upsertTargetAlias(state, alias, route.scope, target, source, createdAt, currentWorkspaceRef);
 	const event = pushWorldObservedEvent(state, request.requestId, source, createdAt, `Remembered alias ${remembered.alias} for ${target.label}.`, { alias: remembered.alias, scope: remembered.scope, targetRef: remembered.targetRef });
 	return { requestId: request.requestId, createdAt, ok: true, displayText: `Remembered ${remembered.scope} alias "${remembered.alias}" for ${target.label}.`, proposedActions: [], events: [event], nextStatePatch: { rememberTarget: target } };
+}
+
+function selectCurrentAliasTarget(targets: readonly AlfredTarget[], currentWorkspaceRef?: AlfredRef, currentSurfaceRef?: AlfredRef): AlfredTarget | undefined {
+	const sendable = targets.filter((candidate) => requiredSendCapabilities(candidate).length > 0);
+	if (currentSurfaceRef) {
+		const surface = sendable.find((candidate) => candidate.ref === currentSurfaceRef || candidate.surfaceRef === currentSurfaceRef);
+		if (surface) return surface;
+	}
+	if (currentWorkspaceRef) {
+		const workspace = sendable.find((candidate) => candidate.ref === currentWorkspaceRef);
+		if (workspace) return workspace;
+		const selectedInWorkspace = sendable.find((candidate) => (candidate.workspaceRef === currentWorkspaceRef || candidate.ref === currentWorkspaceRef) && (candidate.selected || candidate.current));
+		if (selectedInWorkspace) return selectedInWorkspace;
+		const scoped = sendable.find((candidate) => candidate.workspaceRef === currentWorkspaceRef);
+		if (scoped) return scoped;
+	}
+	return sendable.find((candidate) => candidate.selected || candidate.current) ?? sendable[0];
 }
 
 function createAliasForgottenResponse(

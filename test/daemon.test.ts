@@ -1433,6 +1433,34 @@ test("POST /ask executes browser open and unread notification answers", async ()
 	});
 });
 
+test("remember this target prefers request context over unrelated selected targets", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		mock.setTargets([
+			{ kind: "cmux-workspace", ref: "workspace:7", label: "Main", workspaceRef: "workspace:7", workspaceLabel: "Main", selected: true, capabilities: ["world.read", "workspace.send"] },
+			powerCodeTarget(),
+		]);
+		const remembered = await postJson<{ ok: boolean; displayText: string }>(baseUrl, token, "/ask", {
+			requestId: "req_alias_current_context",
+			createdAt: "2026-06-19T22:00:00.000Z",
+			source: piCommandSource(),
+			input: { text: "remember this target as context pi" },
+			context: { currentWorkspaceRef: "workspace:9", currentSurfaceRef: "surface:42" },
+		});
+		assert.equal(remembered.status, 200);
+		assert.match(remembered.body.displayText, /for π - Power Code/);
+
+		const draft = await postJson<{ ok: boolean; pendingDraft?: AlfredDraft }>(baseUrl, token, "/ask", {
+			requestId: "req_alias_current_context_draft",
+			createdAt: "2026-06-19T22:00:01.000Z",
+			source: piCommandSource(),
+			input: { text: "tell context pi run tests" },
+			context: { currentWorkspaceRef: "workspace:9" },
+		});
+		assert.equal(draft.status, 200);
+		assert.equal(draft.body.pendingDraft?.target.ref, "surface:42");
+	});
+});
+
 test("target aliases can be managed through Ask and API and resolve drafts", async () => {
 	await withDaemon(async (baseUrl, token) => {
 		const remembered = await postJson<{ ok: boolean; displayText: string }>(baseUrl, token, "/ask", {
