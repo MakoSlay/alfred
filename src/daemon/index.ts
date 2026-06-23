@@ -850,7 +850,7 @@ async function confirmGenericPendingAction(
 		displayText: executed.ok ? executed.event.summary : `Alfred could not execute ${pending.label}: ${executed.event.summary}`,
 		proposedActions: [],
 		events: [approvedEvent, executedEvent].filter((event): event is AlfredEvent => Boolean(event)),
-		errors: executed.ok ? undefined : [{ code: "unsupported_action", message: executed.event.summary, retryable: true }],
+		errors: executed.ok ? undefined : [{ code: errorCodeForPendingExecutionFailure(pending, executed.event), message: executed.event.summary, retryable: true }],
 		nextStatePatch: resolved.target ? { rememberTarget: resolved.target, rememberDraftId: null } : { rememberDraftId: null },
 	};
 }
@@ -1387,14 +1387,23 @@ function findPendingActionForApproval(state: DaemonState, pendingActionId?: stri
 	const candidates = state.actions.listPending().filter((pending) => pending.status === "pending");
 	if (pendingActionId) return candidates.find((pending) => pending.id === pendingActionId) ?? null;
 	if (draftId) return candidates.find((pending) => pending.id === draftId && pending.actionMetaId === "cmux.sendText") ?? null;
-	return candidates.find((pending) => pending.actionMetaId === "cmux.sendText") ?? null;
+	return candidates.at(-1) ?? null;
 }
 
 function findPendingActionForCancel(state: DaemonState, pendingActionId?: string, draftId?: string): PendingAction | null {
 	const candidates = state.actions.listPending().filter((pending) => pending.status === "pending" || pending.status === "approved");
 	if (pendingActionId) return candidates.find((pending) => pending.id === pendingActionId) ?? null;
 	if (draftId) return candidates.find((pending) => pending.id === draftId && pending.actionMetaId === "cmux.sendText") ?? null;
-	return candidates.find((pending) => pending.actionMetaId === "cmux.sendText") ?? null;
+	return candidates.at(-1) ?? null;
+}
+
+function errorCodeForPendingExecutionFailure(pending: PendingAction, event: AlfredEvent): AlfredError["code"] {
+	if (event.kind === "action.expired") return "confirmation_expired";
+	if (event.kind === "action.denied") return "capability_denied";
+	if (pending.actionMetaId === "cmux.sendText" || pending.actionMetaId === "cmux.sendKey") return "send_failed";
+	if (pending.actionMetaId.startsWith("cmux.")) return "cmux_unavailable";
+	if (pending.actionMetaId.startsWith("loop.")) return "internal_error";
+	return "unsupported_action";
 }
 
 async function resolveLivePendingTarget(

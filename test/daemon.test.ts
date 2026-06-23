@@ -15,6 +15,7 @@ import type { CmuxError } from "../src/cmux/index.ts";
 interface MockCmuxOptions {
 	targets?: AlfredTarget[];
 	sendError?: CmuxError;
+	sendKeyError?: CmuxError;
 }
 
 function createMockCmux(options: MockCmuxOptions = {}) {
@@ -50,7 +51,7 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 			},
 			async sendKeyToSurface(surfaceRef: string, key: string) {
 				sentKeys.push({ surfaceRef, key });
-				return { ok: true as const, value: { surfaceRef, key } };
+				return options.sendKeyError ? { ok: false as const, error: options.sendKeyError } : { ok: true as const, value: { surfaceRef, key } };
 			},
 			async openDiff(options?: Record<string, unknown>) {
 				openedDiffs.push(options);
@@ -295,6 +296,32 @@ test("POST /ask can create and /confirm can execute a generic send-key PendingAc
 	});
 });
 
+test("natural-language confirm executes the latest generic pending action", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const proposed = await postJson<{ ok: boolean; pendingAction?: { id: string; actionMetaId: string } }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_send_key_natural_confirm",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "send key enter to power code" },
+			context: { currentWorkspaceRef: "workspace:9" },
+		});
+		assert.equal(proposed.status, 200);
+		assert.equal(proposed.body.pendingAction?.actionMetaId, "cmux.sendKey");
+
+		const confirmed = await postJson<{ ok: boolean; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_confirm_send_key",
+			createdAt: "2026-06-19T22:00:00.000Z",
+			source: piCommandSource(),
+			input: { text: "confirm" },
+		});
+
+		assert.equal(confirmed.status, 200);
+		assert.equal(confirmed.body.ok, true);
+		assert.equal(confirmed.body.events.some((event) => event.kind === "action.executed"), true);
+		assert.deepEqual(mock.sentKeys, [{ surfaceRef: "surface:42", key: "enter" }]);
+	});
+});
+
 test("/cancel accepts canonical pendingActionId for generic pending actions", async () => {
 	await withDaemon(async (baseUrl, token, mock) => {
 		const proposed = await postJson<{ ok: boolean; pendingAction?: { id: string; actionMetaId: string } }>(baseUrl, token, "/ask", {
@@ -319,6 +346,65 @@ test("/cancel accepts canonical pendingActionId for generic pending actions", as
 		assert.equal(cancelled.body.events[0]?.kind, "action.cancelled");
 		assert.deepEqual(mock.sentKeys, []);
 	});
+});
+
+test("natural-language cancel cancels the latest generic pending action", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const proposed = await postJson<{ ok: boolean; pendingAction?: { id: string } }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_send_key_natural_cancel",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "press escape in power code" },
+			context: { currentWorkspaceRef: "workspace:9" },
+		});
+		assert.ok(proposed.body.pendingAction?.id);
+
+		const cancelled = await postJson<{ ok: boolean; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_cancel_send_key",
+			createdAt: "2026-06-19T22:00:00.000Z",
+			source: piCommandSource(),
+			input: { text: "cancel" },
+		});
+
+		assert.equal(cancelled.status, 200);
+		assert.equal(cancelled.body.ok, true);
+		assert.equal(cancelled.body.events[0]?.kind, "action.cancelled");
+		assert.deepEqual(mock.sentKeys, []);
+	});
+});
+
+test("generic send-key execution failures surface as send_failed", async () => {
+	const mock = createMockCmux({ sendKeyError: { code: "command_failed", message: "cmux key failed" } });
+	const daemon = createAlfredDaemon(
+		{ host: "127.0.0.1", port: 0, authToken: "test-token", storageDir: null },
+		{ cmux: mock.cmux, now: () => new Date("2026-06-19T22:00:00.000Z") },
+	);
+	const started = await daemon.start();
+	const baseUrl = `http://${started.host}:${started.port}`;
+	try {
+		const proposed = await postJson<{ ok: boolean; pendingAction?: { id: string } }>(baseUrl, started.authToken, "/ask", {
+			requestId: "req_ask_send_key_failure",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "send key enter to power code" },
+			context: { currentWorkspaceRef: "workspace:9" },
+		});
+		assert.ok(proposed.body.pendingAction?.id);
+
+		const confirmed = await postJson<{ ok: boolean; errors: Array<{ code: string }>; events: Array<{ kind: string }> }>(baseUrl, started.authToken, "/confirm", {
+			requestId: "req_confirm_send_key_failure",
+			pendingActionId: proposed.body.pendingAction.id,
+			source: piCommandSource(),
+		});
+
+		assert.equal(confirmed.status, 400);
+		assert.equal(confirmed.body.ok, false);
+		assert.equal(confirmed.body.errors[0]?.code, "send_failed");
+		assert.equal(confirmed.body.events.some((event) => event.kind === "action.failed"), true);
+		assert.deepEqual(mock.sentKeys, [{ surfaceRef: "surface:42", key: "enter" }]);
+	} finally {
+		await daemon.stop();
+	}
 });
 
 test("/confirm reports expired generic pending actions before target liveness failures", async () => {
