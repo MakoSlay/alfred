@@ -26,10 +26,16 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 	const sends: Array<{ kind: "surface" | "workspace"; ref: string; text: string }> = [];
 	const sentKeys: Array<{ surfaceRef: string; key: string }> = [];
 	const openedDiffs: Array<Record<string, unknown> | undefined> = [];
+	const openedMarkdown: Array<{ path: string; options?: Record<string, unknown> }> = [];
+	const openedUrls: Array<{ url: string; options?: Record<string, unknown> }> = [];
+	const notifications = [{ id: "notif:1", title: "Build finished", isRead: false, createdAt: "2026-06-19T21:59:00.000Z" }];
 	let targets = options.targets ?? defaultTargets;
 	return {
 		sends,
 		openedDiffs,
+		openedMarkdown,
+		openedUrls,
+		notifications,
 		sentKeys,
 		setTargets(nextTargets: AlfredTarget[]) {
 			targets = nextTargets;
@@ -56,6 +62,17 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 			async openDiff(options?: Record<string, unknown>) {
 				openedDiffs.push(options);
 				return { ok: true as const, value: { opened: true } };
+			},
+			async openMarkdown(path: string, options?: Record<string, unknown>) {
+				openedMarkdown.push({ path, options });
+				return { ok: true as const, value: { path, opened: true } };
+			},
+			async openUrl(url: string, options?: Record<string, unknown>) {
+				openedUrls.push({ url, options });
+				return { ok: true as const, value: { url, opened: true } };
+			},
+			async listNotifications() {
+				return { ok: true as const, value: notifications };
 			},
 		},
 	};
@@ -228,20 +245,123 @@ test("POST /ask answers target list questions without side effects", async () =>
 	});
 });
 
-test("POST /ask executes safe open-diff requests directly through the registry", async () => {
+test("POST /ask answers current workspace and pending action questions", async () => {
+	await withDaemon(async (baseUrl, token) => {
+		const workspace = await postJson<{ ok: boolean; displayText: string; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_workspace",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "what is current workspace" },
+		});
+		assert.equal(workspace.status, 200);
+		assert.equal(workspace.body.ok, true);
+		assert.match(workspace.body.displayText, /Current workspace: Powerco \(workspace:9\)/);
+		assert.equal(workspace.body.events[0]?.kind, "world.observed");
+
+		await createPowercoDraft(baseUrl, token);
+		const pending = await postJson<{ ok: boolean; displayText: string; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_pending_actions",
+			createdAt: "2026-06-19T22:00:00.000Z",
+			source: piCommandSource(),
+			input: { text: "what pending actions exist" },
+		});
+		assert.equal(pending.status, 200);
+		assert.equal(pending.body.ok, true);
+		assert.match(pending.body.displayText, /Pending actions:/);
+		assert.match(pending.body.displayText, /cmux\.sendText/);
+	});
+});
+
+test("POST /ask current workspace prefers context and selected targets", async () => {
 	await withDaemon(async (baseUrl, token, mock) => {
-		const response = await postJson<{ ok: boolean; displayText: string; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
+		mock.setTargets([
+			powerCodeTarget({ ref: "surface:alpha", label: "Alpha", workspaceRef: "workspace:alpha", workspaceLabel: "Alpha", selected: false }),
+			powerCodeTarget({ ref: "surface:beta", label: "Beta", workspaceRef: "workspace:beta", workspaceLabel: "Beta", selected: true }),
+		]);
+		const selected = await postJson<{ ok: boolean; displayText: string }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_workspace_selected",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "what is current workspace" },
+		});
+		assert.equal(selected.status, 200);
+		assert.match(selected.body.displayText, /Current workspace: Beta \(workspace:beta\)/);
+
+		const context = await postJson<{ ok: boolean; displayText: string }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_workspace_context",
+			createdAt: "2026-06-19T22:00:00.000Z",
+			source: piCommandSource(),
+			input: { text: "what is current workspace" },
+			context: { currentWorkspaceRef: "workspace:alpha" },
+		});
+		assert.equal(context.status, 200);
+		assert.match(context.body.displayText, /Current workspace: Alpha \(workspace:alpha\)/);
+	});
+});
+
+test("POST /ask executes safe open and notification requests directly through the registry", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		const diff = await postJson<{ ok: boolean; displayText: string; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
 			requestId: "req_ask_open_diff",
 			createdAt: "2026-06-19T21:59:59.000Z",
 			source: piCommandSource(),
 			input: { text: "open diff" },
 		});
-
-		assert.equal(response.status, 200);
-		assert.equal(response.body.ok, true);
-		assert.match(response.body.displayText, /executed successfully/);
-		assert.equal(response.body.events.some((event) => event.kind === "action.executed"), true);
+		assert.equal(diff.status, 200);
+		assert.equal(diff.body.ok, true);
+		assert.match(diff.body.displayText, /executed successfully/);
+		assert.equal(diff.body.events.some((event) => event.kind === "action.executed"), true);
 		assert.equal(mock.openedDiffs.length, 1);
+
+		const markdown = await postJson<{ ok: boolean; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_open_markdown",
+			createdAt: "2026-06-19T22:00:00.000Z",
+			source: piCommandSource(),
+			input: { text: "open markdown docs/plans/alfred-jarvis-roadmap/PLAN.md" },
+		});
+		assert.equal(markdown.status, 200);
+		assert.equal(markdown.body.ok, true);
+		assert.deepEqual(mock.openedMarkdown.map((entry) => entry.path), ["docs/plans/alfred-jarvis-roadmap/PLAN.md"]);
+
+		const url = await postJson<{ ok: boolean }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_open_url",
+			createdAt: "2026-06-19T22:00:01.000Z",
+			source: piCommandSource(),
+			input: { text: "open URL https://example.test/docs" },
+		});
+		assert.equal(url.status, 200);
+		assert.equal(url.body.ok, true);
+		assert.deepEqual(mock.openedUrls.map((entry) => entry.url), ["https://example.test/docs"]);
+
+		const blockedMarkdown = await postJson<{ ok: boolean; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_open_markdown_blocked",
+			createdAt: "2026-06-19T22:00:02.000Z",
+			source: piCommandSource(),
+			input: { text: "open markdown ../secret.md" },
+		});
+		assert.equal(blockedMarkdown.status, 200);
+		assert.equal(blockedMarkdown.body.ok, true);
+		const blockedUncMarkdown = await postJson<{ ok: boolean }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_open_markdown_unc_blocked",
+			createdAt: "2026-06-19T22:00:02.500Z",
+			source: piCommandSource(),
+			input: { text: "open markdown \\server\\share\\secret.md" },
+		});
+		assert.equal(blockedUncMarkdown.status, 200);
+		assert.equal(blockedUncMarkdown.body.ok, true);
+		assert.deepEqual(mock.openedMarkdown.map((entry) => entry.path), ["docs/plans/alfred-jarvis-roadmap/PLAN.md"]);
+
+		const notifications = await postJson<{ ok: boolean; displayText: string; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_notifications",
+			createdAt: "2026-06-19T22:00:03.000Z",
+			source: piCommandSource(),
+			input: { text: "read notifications" },
+		});
+		assert.equal(notifications.status, 200);
+		assert.equal(notifications.body.ok, true);
+		assert.match(notifications.body.displayText, /Notifications:/);
+		assert.match(notifications.body.displayText, /Build finished \(unread\)/);
+		assert.equal(notifications.body.events.some((event) => event.kind === "action.executed"), true);
 		assert.deepEqual(mock.sends, []);
 	});
 });
@@ -1220,6 +1340,9 @@ test("daemon reports structured errors for bad JSON and unavailable cmux", async
 				async sendTextToWorkspace() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async sendKeyToSurface() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async openDiff() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
+				async openMarkdown() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
+				async openUrl() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
+				async listNotifications() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 			},
 		},
 	);

@@ -49,7 +49,7 @@ export interface AlfredDaemonStateSnapshot {
 	storageWarnings?: string[];
 }
 
-type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace" | "sendKeyToSurface" | "openDiff">;
+type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace" | "sendKeyToSurface" | "openDiff" | "openMarkdown" | "openUrl" | "listNotifications">;
 
 export interface AlfredDaemonDependencies {
 	cmux?: AlfredDaemonCmux;
@@ -368,8 +368,25 @@ async function handleRequest(
 	if (isTargetListInput(inputText)) {
 		return createTargetsAnswerResponse(request, effectiveSource, targets.value, state, now);
 	}
+	if (isCurrentWorkspaceInput(inputText)) {
+		return createCurrentWorkspaceAnswerResponse(request, effectiveSource, targets.value, state, now, request.context?.currentWorkspaceRef);
+	}
+	if (isPendingActionsInput(inputText)) {
+		return createPendingActionsAnswerResponse(request, effectiveSource, state, now);
+	}
 	if (isOpenDiffInput(inputText)) {
 		return await executeSafeAction(request, effectiveSource, state, cmux, now, "cmux.openDiff", { unstaged: true });
+	}
+	const markdownPath = parseOpenMarkdownInput(inputText);
+	if (markdownPath) {
+		return await executeSafeAction(request, effectiveSource, state, cmux, now, "cmux.openMarkdown", { path: markdownPath });
+	}
+	const urlToOpen = parseOpenUrlInput(inputText);
+	if (urlToOpen) {
+		return await executeSafeAction(request, effectiveSource, state, cmux, now, "cmux.openUrl", { url: urlToOpen });
+	}
+	if (isReadNotificationsInput(inputText)) {
+		return await executeSafeAction(request, effectiveSource, state, cmux, now, "cmux.readNotifications", {});
 	}
 	const keyIntent = resolveSendKeyIntent(inputText, targets.value, request.context?.currentWorkspaceRef);
 	if (keyIntent) {
@@ -416,17 +433,7 @@ function createTargetsAnswerResponse(
 	const lines = visible.map((target) => `- ${target.label} (${target.kind}, ${target.ref})${target.current ? " — current" : ""}`);
 	const more = targets.length > visible.length ? `\n…and ${targets.length - visible.length} more.` : "";
 	const displayText = targets.length > 0 ? `Visible targets:\n${lines.join("\n")}${more}` : "No cmux targets are visible right now.";
-	const event = pushEvent(state, {
-		id: nextId("evt"),
-		kind: "world.observed",
-		createdAt,
-		requestId: request.requestId,
-		source: { kind: source.kind, id: source.id, label: source.label },
-		summary: `Listed ${targets.length} visible target${targets.length === 1 ? "" : "s"}.`,
-		data: { targetCount: targets.length },
-		redaction: { status: "not_needed" },
-		retention: defaultEventRetention(createdAt),
-	});
+	const event = pushWorldObservedEvent(state, request.requestId, source, createdAt, `Listed ${targets.length} visible target${targets.length === 1 ? "" : "s"}.`, { targetCount: targets.length });
 	return {
 		requestId: request.requestId,
 		createdAt,
@@ -436,6 +443,79 @@ function createTargetsAnswerResponse(
 		events: [event],
 		nextStatePatch: visible[0] ? { rememberTarget: visible[0] } : undefined,
 	};
+}
+
+function createCurrentWorkspaceAnswerResponse(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	targets: readonly AlfredTarget[],
+	state: DaemonState,
+	now: () => Date,
+	currentWorkspaceRef?: AlfredRef,
+): AlfredHandleResponse {
+	const createdAt = now().toISOString();
+	const workspaceTargets = targets.filter((target) => target.kind === "cmux-workspace" || target.workspaceRef || target.workspaceLabel);
+	const current = (currentWorkspaceRef ? workspaceTargets.find((target) => target.ref === currentWorkspaceRef || target.workspaceRef === currentWorkspaceRef) : undefined)
+		?? workspaceTargets.find((target) => target.selected)
+		?? workspaceTargets.find((target) => target.current)
+		?? workspaceTargets[0];
+	const workspaceRef = current?.kind === "cmux-workspace" ? current.ref : current?.workspaceRef;
+	const workspaceLabel = current?.kind === "cmux-workspace" ? current.label : current?.workspaceLabel;
+	const displayText = workspaceRef || workspaceLabel
+		? `Current workspace: ${workspaceLabel ?? workspaceRef} (${workspaceRef ?? "unknown ref"}).`
+		: "I cannot determine the current workspace from visible cmux targets.";
+	const event = pushWorldObservedEvent(state, request.requestId, source, createdAt, "Answered current workspace question.", { workspaceRef: workspaceRef ?? null, workspaceLabel: workspaceLabel ?? null });
+	return {
+		requestId: request.requestId,
+		createdAt,
+		ok: true,
+		displayText,
+		proposedActions: [],
+		events: [event],
+		nextStatePatch: current ? { rememberTarget: current } : undefined,
+	};
+}
+
+function createPendingActionsAnswerResponse(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	state: DaemonState,
+	now: () => Date,
+): AlfredHandleResponse {
+	const createdAt = now().toISOString();
+	const items = pendingActions(state, createdAt).slice(0, 12);
+	const lines = items.map((pending) => `- ${pending.label} (${pending.actionMetaId}, ${pending.status}, ${pending.id})${pending.target ? ` → ${pending.target.label}` : ""}`);
+	const displayText = items.length > 0 ? `Pending actions:\n${lines.join("\n")}` : "There are no pending actions right now.";
+	const event = pushWorldObservedEvent(state, request.requestId, source, createdAt, `Listed ${items.length} pending action${items.length === 1 ? "" : "s"}.`, { pendingActionCount: items.length });
+	return {
+		requestId: request.requestId,
+		createdAt,
+		ok: true,
+		displayText,
+		proposedActions: [],
+		events: [event],
+	};
+}
+
+function pushWorldObservedEvent(
+	state: DaemonState,
+	requestId: AlfredId,
+	source: AlfredSource,
+	createdAt: IsoTimestamp,
+	summary: string,
+	data?: Record<string, unknown>,
+): AlfredEvent {
+	return pushEvent(state, {
+		id: nextId("evt"),
+		kind: "world.observed",
+		createdAt,
+		requestId,
+		source: { kind: source.kind, id: source.id, label: source.label },
+		summary,
+		data,
+		redaction: { status: "not_needed" },
+		retention: defaultEventRetention(createdAt),
+	});
 }
 
 async function executeSafeAction(
@@ -471,15 +551,30 @@ async function executeSafeAction(
 		cmux: cmux as never,
 	});
 	const executedEvent = recordActionEvent(state, executed.event);
+	const displayText = executed.ok && actionId === "cmux.readNotifications"
+		? formatNotificationsDisplay(executed.pending.result?.notifications)
+		: executed.ok ? executed.event.summary : `Alfred could not execute ${actionId}: ${executed.event.summary}`;
 	return {
 		requestId: request.requestId,
 		createdAt: executed.event.createdAt,
 		ok: executed.ok,
-		displayText: executed.ok ? executed.event.summary : `Alfred could not execute ${actionId}: ${executed.event.summary}`,
+		displayText,
 		proposedActions: [],
 		events: [proposedEvent, executedEvent],
 		errors: executed.ok ? undefined : [{ code: "unsupported_action", message: executed.event.summary, retryable: true }],
 	};
+}
+
+function formatNotificationsDisplay(value: unknown): string {
+	const notifications = Array.isArray(value) ? value.slice(0, 12) : [];
+	if (notifications.length === 0) return "No cmux notifications are visible right now.";
+	const lines = notifications.map((notification) => {
+		const record = typeof notification === "object" && notification !== null ? notification as Record<string, unknown> : {};
+		const title = typeof record.title === "string" && record.title.trim() ? record.title : String(record.id ?? "notification");
+		const state = record.isRead === true ? "read" : "unread";
+		return `- ${title} (${state})`;
+	});
+	return `Notifications:\n${lines.join("\n")}`;
 }
 
 function createNoActionResponse(
@@ -1306,8 +1401,49 @@ function isTargetListInput(inputText: string): boolean {
 		|| /^(?:what|which)\s+(?:targets|surfaces|workspaces)\s+(?:are\s+)?(?:active|visible|available)\??$/i.test(inputText.trim());
 }
 
+function isCurrentWorkspaceInput(inputText: string): boolean {
+	return /^(?:what|which)\s+(?:is\s+)?(?:the\s+)?current\s+workspace\??$/i.test(inputText.trim())
+		|| /^where\s+am\s+i\??$/i.test(inputText.trim());
+}
+
+function isPendingActionsInput(inputText: string): boolean {
+	return /^(?:what\s+)?pending\s+actions(?:\s+(?:exist|are\s+there))?\??$/i.test(inputText.trim())
+		|| /^(?:list|show)\s+(?:the\s+)?pending\s+actions\??$/i.test(inputText.trim());
+}
+
 function isOpenDiffInput(inputText: string): boolean {
 	return /^(?:open|show)\s+(?:the\s+)?(?:diff|changes)(?:\s+view)?$/i.test(inputText.trim());
+}
+
+function parseOpenMarkdownInput(inputText: string): string | null {
+	const match = inputText.trim().match(/^(?:open|show)\s+(?:markdown|md)(?:\s+(?:file|preview))?\s+(.+)$/i);
+	const path = match?.[1]?.trim();
+	return path && isSafeRelativeMarkdownPath(path) ? path : null;
+}
+
+function isSafeRelativeMarkdownPath(path: string): boolean {
+	if (!/\.(?:md|markdown)$/i.test(path)) return false;
+	if (path.startsWith("/") || path.startsWith("\\") || path.startsWith("~") || path.startsWith("-")) return false;
+	if (/^[a-z]:[\\/]/i.test(path)) return false;
+	const parts = path.split(/[\\/]+/).filter(Boolean);
+	return parts.length > 0 && parts.every((part) => part !== "." && part !== ".." && !part.startsWith("-"));
+}
+
+function parseOpenUrlInput(inputText: string): string | null {
+	const match = inputText.trim().match(/^(?:open|show)\s+(?:url\s+)?(https?:\/\/\S+)$/i);
+	const rawUrl = match?.[1]?.trim();
+	if (!rawUrl) return null;
+	try {
+		const url = new URL(rawUrl);
+		return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+	} catch {
+		return null;
+	}
+}
+
+function isReadNotificationsInput(inputText: string): boolean {
+	return /^(?:read|list|show)\s+(?:cmux\s+)?notifications\??$/i.test(inputText.trim())
+		|| /^(?:what\s+)?notifications(?:\s+are\s+there)?\??$/i.test(inputText.trim());
 }
 
 function isConfirmInput(inputText: string): boolean {
