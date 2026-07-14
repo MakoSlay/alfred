@@ -48,8 +48,9 @@ export interface SessionMemoryRecord extends BaseMemoryRecord {
 
 export type KnowledgeSourceType = "document" | "note" | "project";
 export type KnowledgeSourceStatus = "metadata_only" | "indexed" | "error";
+export type KnowledgeSourceOrigin = "dashboard" | "file" | "assistant";
 
-/** Metadata contract only. Content, chunks, embeddings, and ranking are Phase 5. */
+/** Durable metadata for an imported local knowledge source. */
 export interface KnowledgeSourceRecord extends BaseMemoryRecord {
 	kind: "knowledge";
 	title: string;
@@ -59,8 +60,40 @@ export interface KnowledgeSourceRecord extends BaseMemoryRecord {
 	sizeBytes?: number;
 	contentHash?: string;
 	status: KnowledgeSourceStatus;
+	/** How this source entered Knowledge. Assistant-created sources are visibly marked. */
+	origin?: KnowledgeSourceOrigin;
 	error?: string;
+	chunkCount?: number;
+	indexedAt?: string;
 }
+
+/** One deterministic lexical-retrieval unit persisted in chunks.jsonl. */
+export interface KnowledgeChunkRecord {
+	id: string;
+	sourceId: string;
+	index: number;
+	text: string;
+	startChar: number;
+	endChar: number;
+	contentHash: string;
+	createdAt: string;
+}
+
+/** Bounded passage returned by lexical search and safe to cite by ID. */
+export interface KnowledgeSearchMatch {
+	citationId: string;
+	sourceId: string;
+	chunkId: string;
+	title: string;
+	sourceType: KnowledgeSourceType;
+	origin?: KnowledgeSourceOrigin;
+	location?: string;
+	chunkIndex: number;
+	text: string;
+	score: number;
+}
+
+export type KnowledgeCitation = KnowledgeSearchMatch;
 
 export type MemoryRecord = ProfileMemoryRecord | SessionMemoryRecord | KnowledgeSourceRecord;
 
@@ -80,7 +113,7 @@ export interface MemoryDashboardState {
 	};
 	knowledge: {
 		persistent: true;
-		available: false;
+		available: boolean;
 		count: number;
 		sources: KnowledgeSourceRecord[];
 	};
@@ -116,7 +149,10 @@ export function isMemoryRecord(value: unknown): value is MemoryRecord {
 		&& (record.mimeType === undefined || typeof record.mimeType === "string")
 		&& (record.sizeBytes === undefined || (typeof record.sizeBytes === "number" && Number.isFinite(record.sizeBytes) && record.sizeBytes >= 0))
 		&& (record.contentHash === undefined || typeof record.contentHash === "string")
-		&& (record.error === undefined || typeof record.error === "string");
+		&& (record.origin === undefined || ["dashboard", "file", "assistant"].includes(String(record.origin)))
+		&& (record.error === undefined || typeof record.error === "string")
+		&& (record.chunkCount === undefined || (typeof record.chunkCount === "number" && Number.isInteger(record.chunkCount) && record.chunkCount >= 0))
+		&& (record.indexedAt === undefined || typeof record.indexedAt === "string");
 }
 
 function isMemoryProvenance(value: unknown): value is MemoryProvenance {

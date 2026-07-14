@@ -60,7 +60,7 @@ function state(records: ProfileFact[]): DashboardState {
     },
     undoCount: 0,
     undoHistory: [],
-    tools: { count: 24, names: [] },
+    tools: { count: 26, names: [] },
     tts: {
       provider: "edge",
       fallbackProvider: "macos",

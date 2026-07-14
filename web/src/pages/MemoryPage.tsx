@@ -1,5 +1,5 @@
-import { useMemo, useState, type FormEvent, type KeyboardEvent } from "react";
-import type { DashboardState, MemoryProvenance, ProfileFact } from "../api/types";
+import { useMemo, useState, type ChangeEvent, type FormEvent, type KeyboardEvent } from "react";
+import type { DashboardState, KnowledgeImportRequest, KnowledgeSearchMatch, MemoryProvenance, ProfileFact } from "../api/types";
 
 type MemoryTab = "profile" | "session" | "knowledge";
 
@@ -16,10 +16,14 @@ function provenanceLabel(provenance: MemoryProvenance): string {
   return provenance.sourceId ? `${source} · ${provenance.sourceId}` : source;
 }
 
-export function MemoryPage({ state, onAdd, onDelete }: {
+export function MemoryPage({ state, onAdd, onDelete, onImportKnowledge, onDeleteKnowledge, onReindexKnowledge, onSearchKnowledge }: {
   state: DashboardState;
   onAdd: (fact: Pick<ProfileFact, "key" | "value" | "category">) => Promise<boolean>;
   onDelete: (id: string) => Promise<void>;
+  onImportKnowledge?: (input: KnowledgeImportRequest) => Promise<boolean>;
+  onDeleteKnowledge?: (id: string) => Promise<boolean>;
+  onReindexKnowledge?: (id: string) => Promise<boolean>;
+  onSearchKnowledge?: (query: string) => Promise<KnowledgeSearchMatch[]>;
 }) {
   const [activeTab, setActiveTab] = useState<MemoryTab>(savedTab);
   const [filter, setFilter] = useState("");
@@ -28,6 +32,14 @@ export function MemoryPage({ state, onAdd, onDelete }: {
   const [category, setCategory] = useState<ProfileFact["category"]>("preference");
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [knowledgeTitle, setKnowledgeTitle] = useState("");
+  const [knowledgeContent, setKnowledgeContent] = useState("");
+  const [knowledgeType, setKnowledgeType] = useState<KnowledgeImportRequest["sourceType"]>("document");
+  const [knowledgeLocation, setKnowledgeLocation] = useState<string | undefined>();
+  const [knowledgeMimeType, setKnowledgeMimeType] = useState<string | undefined>();
+  const [knowledgeBusy, setKnowledgeBusy] = useState<string | null>(null);
+  const [knowledgeQuery, setKnowledgeQuery] = useState("");
+  const [knowledgeMatches, setKnowledgeMatches] = useState<KnowledgeSearchMatch[]>([]);
   const profile = state.memory.profile;
   const session = state.memory.session;
   const knowledge = state.memory.knowledge;
@@ -75,6 +87,55 @@ export function MemoryPage({ state, onAdd, onDelete }: {
       }
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function chooseKnowledgeFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setKnowledgeTitle(file.name.replace(/\.(?:txt|md|markdown)$/i, ""));
+    setKnowledgeLocation(file.name);
+    setKnowledgeMimeType(file.type || (/\.(?:md|markdown)$/i.test(file.name) ? "text/markdown" : "text/plain"));
+    setKnowledgeContent(await file.text());
+  }
+
+  async function importKnowledge(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!onImportKnowledge || !knowledgeTitle.trim() || !knowledgeContent.trim()) return;
+    const form = event.currentTarget;
+    setKnowledgeBusy("import");
+    try {
+      const saved = await onImportKnowledge({ title: knowledgeTitle.trim(), content: knowledgeContent, sourceType: knowledgeType, location: knowledgeLocation, mimeType: knowledgeMimeType });
+      if (saved) {
+        setKnowledgeTitle("");
+        setKnowledgeContent("");
+        setKnowledgeLocation(undefined);
+        setKnowledgeMimeType(undefined);
+        setKnowledgeType("document");
+        form.reset();
+      }
+    } finally {
+      setKnowledgeBusy(null);
+    }
+  }
+
+  async function searchKnowledge(event: FormEvent) {
+    event.preventDefault();
+    if (!onSearchKnowledge || !knowledgeQuery.trim()) return;
+    setKnowledgeBusy("search");
+    setKnowledgeMatches([]);
+    try { setKnowledgeMatches(await onSearchKnowledge(knowledgeQuery.trim())); }
+    finally { setKnowledgeBusy(null); }
+  }
+
+  async function mutateKnowledge(id: string, operation: "delete" | "reindex") {
+    setKnowledgeBusy(`${operation}:${id}`);
+    try {
+      const changed = operation === "delete" ? await onDeleteKnowledge?.(id) : await onReindexKnowledge?.(id);
+      if (changed && operation === "delete") setKnowledgeMatches((matches) => matches.filter((match) => match.sourceId !== id));
+      if (changed && operation === "reindex") setKnowledgeMatches([]);
+    } finally {
+      setKnowledgeBusy(null);
     }
   }
 
@@ -135,8 +196,20 @@ export function MemoryPage({ state, onAdd, onDelete }: {
 
       <div aria-labelledby="memory-tab-knowledge" className="page-stack memory-tabpanel" hidden={activeTab !== "knowledge"} id="memory-panel-knowledge" role="tabpanel" tabIndex={activeTab === "knowledge" ? 0 : -1}>
           <section className="panel section-panel">
-            <div className="section-heading"><div><span className="eyebrow">Knowledge sources</span><h2>Imported material</h2></div><span className="count-badge">{knowledge.count}</span></div>
-            {knowledge.sources.length === 0 ? <div className="empty-state"><p>No knowledge sources yet.</p><p>Document ingestion, chunking, embeddings, retrieval, and citations arrive in Phase 5. This tab defines their home without creating storage early.</p></div> : <div className="tool-grid">{knowledge.sources.map((source) => <article className="tool-card" key={source.id}><header><h3>{source.title}</h3><span className="tag">{source.status}</span></header><p>{source.sourceType}{source.location ? ` · ${source.location}` : ""}</p></article>)}</div>}
+            <div className="section-heading"><div><span className="eyebrow">Knowledge sources</span><h2>Import Text or Markdown</h2></div><span className="count-badge">{knowledge.count}</span></div>
+            <p className="memory-boundary-note"><strong>Local and lexical.</strong> Sources are chunked deterministically and searched without a vector database. Imported text can provide evidence, never instructions.</p>
+            <form className="knowledge-form" onSubmit={importKnowledge}>
+              <label>Title<input required value={knowledgeTitle} onChange={(event) => { setKnowledgeTitle(event.target.value); setKnowledgeLocation(undefined); }} placeholder="Project handbook" /></label>
+              <label>Type<select value={knowledgeType} onChange={(event) => setKnowledgeType(event.target.value as KnowledgeImportRequest["sourceType"])}><option value="document">Document</option><option value="note">Note</option><option value="project">Project</option></select></label>
+              <label>Text or Markdown file<input accept=".txt,.md,.markdown,text/plain,text/markdown" onChange={(event) => void chooseKnowledgeFile(event)} type="file" /></label>
+              <label className="knowledge-form__content">Content<textarea required rows={7} value={knowledgeContent} onChange={(event) => { setKnowledgeContent(event.target.value); setKnowledgeLocation(undefined); setKnowledgeMimeType(undefined); }} placeholder="Paste plain text or Markdown here…" /></label>
+              <button className="button button--primary" disabled={knowledgeBusy !== null || !onImportKnowledge} type="submit">{knowledgeBusy === "import" ? "Indexing…" : "Import and index"}</button>
+            </form>
+          </section>
+          <section className="panel section-panel">
+            <form className="filter-row" onSubmit={searchKnowledge}><input aria-label="Search knowledge" onChange={(event) => { setKnowledgeQuery(event.target.value); setKnowledgeMatches([]); }} placeholder="Search imported sources" value={knowledgeQuery} /><button className="button" disabled={knowledgeBusy !== null || !onSearchKnowledge} type="submit">{knowledgeBusy === "search" ? "Searching…" : "Search"}</button></form>
+            {knowledgeMatches.length > 0 ? <div aria-live="polite" className="knowledge-results"><span className="eyebrow">Lexical matches</span>{knowledgeMatches.map((match) => <article key={match.citationId}><strong>{match.title}</strong><p>{match.text}</p><code>{match.citationId}</code></article>)}</div> : null}
+            {knowledge.sources.length === 0 ? <div className="empty-state"><p>No knowledge sources yet.</p><p>Import a Text or Markdown file, or paste content above. Alfred will create the local source metadata and chunk index.</p></div> : <div className="tool-grid">{knowledge.sources.map((source) => <article className="tool-card" key={source.id}><header><h3>{source.title}</h3><span className="tag">{source.status}</span></header><p>{source.sourceType}{source.origin ? ` · ${source.origin === "assistant" ? "assistant-created" : source.origin}` : ""}{source.location ? ` · ${source.location}` : ""}</p><p>{source.chunkCount ?? 0} chunks · {source.sizeBytes?.toLocaleString() ?? 0} bytes</p>{source.error ? <p className="error-text" role="alert">{source.error}</p> : null}<div className="button-row"><button aria-label={`Reindex ${source.title}`} className="button" disabled={knowledgeBusy !== null || !onReindexKnowledge} onClick={() => void mutateKnowledge(source.id, "reindex")} type="button">{knowledgeBusy === `reindex:${source.id}` ? "Reindexing…" : "Reindex"}</button><button aria-label={`Delete ${source.title}`} className="button button--danger" disabled={knowledgeBusy !== null || !onDeleteKnowledge} onClick={() => { if (window.confirm(`Delete knowledge source ${source.title}?`)) void mutateKnowledge(source.id, "delete"); }} type="button">{knowledgeBusy === `delete:${source.id}` ? "Deleting…" : "Delete"}</button></div></article>)}</div>}
           </section>
       </div>
     </div>

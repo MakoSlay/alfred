@@ -108,7 +108,7 @@ function validateParsedModelObject(value: unknown, registeredTools: readonly str
 	const hasTool = Object.prototype.hasOwnProperty.call(obj, "tool");
 
 	if (hasSpeech && !hasTool) {
-		const allowed = new Set(["speech", "displayText"]);
+		const allowed = new Set(["speech", "displayText", "citations"]);
 		const extra = Object.keys(obj).filter((key) => !allowed.has(key));
 		if (extra.length) return { kind: "invalid", error: `final speech has unsupported field(s): ${extra.join(", ")}` };
 		if (typeof obj.speech !== "string" || obj.speech.trim().length === 0) {
@@ -117,9 +117,16 @@ function validateParsedModelObject(value: unknown, registeredTools: readonly str
 		if (obj.displayText !== undefined && typeof obj.displayText !== "string") {
 			return { kind: "invalid", error: "displayText must be a string when provided" };
 		}
+		if (obj.citations !== undefined && (!Array.isArray(obj.citations) || obj.citations.length > 10 || obj.citations.some((citation) => typeof citation !== "string" || citation.length === 0))) {
+			return { kind: "invalid", error: "citations must be an array of at most 10 non-empty citation IDs" };
+		}
 		return {
 			kind: "final",
-			value: { speech: obj.speech.trim(), displayText: typeof obj.displayText === "string" ? obj.displayText : undefined },
+			value: {
+				speech: obj.speech.trim(),
+				displayText: typeof obj.displayText === "string" ? obj.displayText : undefined,
+				citations: Array.isArray(obj.citations) ? [...new Set(obj.citations as string[])] : undefined,
+			},
 		};
 	}
 
@@ -198,7 +205,26 @@ function validateToolCall(obj: Record<string, unknown>, tool: AlfredToolName): V
 			break;
 		case "recall":
 			error = rejectExtra(["query"]);
+			if (!error && obj.query !== undefined && typeof obj.query !== "string") error = "query must be a string when provided";
 			break;
+		case "search_knowledge":
+			error = rejectExtra(["query", "topK", "limit", "sourceId"]);
+			if (!error) error = requireString("query");
+			if (!error && obj.topK !== undefined && (!Number.isFinite(obj.topK) || typeof obj.topK !== "number" || obj.topK < 1 || obj.topK > 10)) error = "topK must be a number from 1 to 10 when provided";
+			if (!error && obj.limit !== undefined && (!Number.isFinite(obj.limit) || typeof obj.limit !== "number" || obj.limit < 1 || obj.limit > 10)) error = "limit must be a number from 1 to 10 when provided";
+			if (!error && obj.sourceId !== undefined && typeof obj.sourceId !== "string") error = "sourceId must be a string when provided";
+			break;
+		case "import_knowledge": {
+			error = rejectExtra(["path", "content", "title", "sourceType"]);
+			if (!error && (obj.cwd !== undefined || obj.workspaceRef !== undefined)) error = "import_knowledge cannot override cwd or workspaceRef";
+			const hasPath = typeof obj.path === "string" && obj.path.trim().length > 0;
+			const hasContent = typeof obj.content === "string" && obj.content.trim().length > 0;
+			if (!error && hasPath === hasContent) error = "import_knowledge requires exactly one of path or content";
+			if (!error && hasContent && (typeof obj.title !== "string" || obj.title.trim().length === 0)) error = "import_knowledge content requires a non-empty title";
+			if (!error && obj.title !== undefined && typeof obj.title !== "string") error = "title must be a string when provided";
+			if (!error && obj.sourceType !== undefined && !["document", "note", "project"].includes(String(obj.sourceType))) error = "sourceType must be document, note, or project when provided";
+			break;
+		}
 		case "set_voice_settings":
 			error = rejectExtra(["fishSpeed", "edgeRate", "speechStyle", "witLevel", "sarcasmLevel", "provider", "fallbackProvider"]);
 			if (!error && obj.fishSpeed !== undefined && (!Number.isFinite(obj.fishSpeed) || typeof obj.fishSpeed !== "number" || obj.fishSpeed < 0.5 || obj.fishSpeed > 2)) error = "fishSpeed must be a number from 0.5 to 2 when provided";

@@ -1,4 +1,5 @@
 import type { StructuredFailure } from "./capabilities/failure-codes.ts";
+import type { KnowledgeCitation } from "./memory-types.ts";
 
 export const ALFRED_TOOL_NAMES = [
 	"bash",
@@ -9,6 +10,8 @@ export const ALFRED_TOOL_NAMES = [
 	"fetch_content",
 	"remember",
 	"recall",
+	"search_knowledge",
+	"import_knowledge",
 	"set_voice_settings",
 	"refresh_context",
 	"inspect_session",
@@ -38,6 +41,8 @@ export const ALFRED_TOOL_PROMPT_SNIPPETS: Record<AlfredToolName, string> = {
 	fetch_content: 'fetch_content: {"tool":"fetch_content","url":"https://..."}',
 	remember: 'remember: {"tool":"remember","key":"fact name","value":"fact value","category":"preference|identity|context|note"}',
 	recall: 'recall: {"tool":"recall","query":"optional filter"}',
+	search_knowledge: 'search_knowledge: {"tool":"search_knowledge","query":"terms to find","topK":5,"sourceId":"optional source id"} — searches imported Text/Markdown; cite returned IDs in the final citations array',
+	import_knowledge: 'import_knowledge: {"tool":"import_knowledge","path":"workspace-relative .txt/.md file","title":"optional"} or {"tool":"import_knowledge","title":"required note title","content":"assistant-created note","sourceType":"note"} — persistent mutation; use only when explicitly asked',
 	set_voice_settings: 'set_voice_settings: {"tool":"set_voice_settings","fishSpeed":1.1,"edgeRate":"+10%","speechStyle":"auto|neutral|warm|calm|dry|reassuring|sarcastic","witLevel":"off|light|medium","sarcasmLevel":"off|light|medium"}',
 	refresh_context: 'refresh_context: {"tool":"refresh_context","forceFresh":true}',
 	inspect_session: 'inspect_session: {"tool":"inspect_session","workspaceName":"Project workspace"} or {"tool":"inspect_session","workspaceRef":"workspace:11"} — workspace-only auto-inspector; add tabHint or surfaceRef to target a specific tab. maxSurfaces (1-5) controls how many tabs to inspect when running workspace-only.',
@@ -174,6 +179,29 @@ export interface RememberToolCall {
 export interface RecallToolCall {
 	tool: "recall";
 	query?: string;
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface SearchKnowledgeToolCall {
+	tool: "search_knowledge";
+	query: string;
+	topK?: number;
+	/** Compatibility alias for topK. */
+	limit?: number;
+	sourceId?: string;
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface ImportKnowledgeToolCall {
+	tool: "import_knowledge";
+	/** Workspace-relative Text/Markdown file to import. Mutually exclusive with content. */
+	path?: string;
+	/** Assistant-created content to save as a clearly marked knowledge source. */
+	content?: string;
+	title?: string;
+	sourceType?: "document" | "note" | "project";
 	requestId?: string;
 	toolCallId?: string;
 }
@@ -330,6 +358,8 @@ export type AlfredToolCall =
 	| FetchContentToolCall
 	| RememberToolCall
 	| RecallToolCall
+	| SearchKnowledgeToolCall
+	| ImportKnowledgeToolCall
 	| SetVoiceSettingsToolCall
 	| RefreshContextToolCall
 	| InspectSessionToolCall
@@ -350,6 +380,8 @@ export type AlfredToolCall =
 export interface AlfredFinalSpeech {
 	speech: string;
 	displayText?: string;
+	/** Citation IDs returned by search_knowledge during this request. */
+	citations?: string[];
 }
 
 export type AlfredModelTurn = AlfredFinalSpeech | AlfredToolCall;
@@ -389,6 +421,8 @@ export interface DisplaySurfaceResponse {
 	speech: string;
 	/** Full detail for API/HTTP consumers. */
 	displayText: string;
+	/** Request-scoped, validated local knowledge citations. */
+	citations?: KnowledgeCitation[];
 	/** Optional short macOS notification summary; never full logs, diffs, or secrets. */
 	notificationText?: string;
 }

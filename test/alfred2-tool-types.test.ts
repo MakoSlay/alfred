@@ -12,6 +12,8 @@ test("tool registry contains first-phase tools and excludes deferred capabilitie
 		"fetch_content",
 		"remember",
 		"recall",
+		"search_knowledge",
+		"import_knowledge",
 		"set_voice_settings",
 		"refresh_context",
 		"inspect_session",

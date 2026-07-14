@@ -52,11 +52,11 @@ function dashboardState(): DashboardState {
           provenance: { source: "conversation", requestId: "req-test", timestamp },
         }],
       },
-      knowledge: { persistent: true, available: false, count: 0, sources: [] },
+      knowledge: { persistent: true, available: true, count: 0, sources: [] },
     },
     undoCount: 0,
     undoHistory: [],
-    tools: { count: 24, names: [] },
+    tools: { count: 26, names: [] },
     tts: {
       provider: "edge",
       fallbackProvider: "macos",
@@ -181,5 +181,71 @@ describe("MemoryPage", () => {
     await user.click(screen.getByRole("tab", { name: /Session/ }));
     expect(container.querySelector("dl.definition-list dt")?.textContent).toBe("Context");
     expect(container.querySelectorAll("dl.definition-list dd")).toHaveLength(2);
+  });
+
+  it("deletes and reindexes knowledge sources by stable ID", async () => {
+    const user = userEvent.setup();
+    const state = dashboardState();
+    state.memory.knowledge = {
+      persistent: true,
+      available: true,
+      count: 1,
+      sources: [{
+        id: "knowledge-source-1",
+        kind: "knowledge",
+        title: "Handbook",
+        sourceType: "document",
+        status: "indexed",
+        chunkCount: 2,
+        sizeBytes: 420,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        provenance: { source: "import", timestamp },
+      }],
+    };
+    const onDeleteKnowledge = vi.fn().mockResolvedValue(true);
+    const onReindexKnowledge = vi.fn().mockResolvedValue(true);
+    const onSearchKnowledge = vi.fn().mockResolvedValue([{ citationId: "knowledge:knowledge-source-1:chunk-1", sourceId: "knowledge-source-1", chunkId: "chunk-1", title: "Handbook", sourceType: "document", chunkIndex: 0, text: "Stale indexed passage.", score: 1 }]);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MemoryPage state={state} onAdd={vi.fn()} onDelete={vi.fn()} onDeleteKnowledge={onDeleteKnowledge} onReindexKnowledge={onReindexKnowledge} onSearchKnowledge={onSearchKnowledge} />);
+    await user.click(screen.getByRole("tab", { name: /Knowledge/ }));
+    await user.type(screen.getByLabelText("Search knowledge"), "indexed");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    expect(await screen.findByText("Stale indexed passage.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Reindex Handbook" }));
+    expect(onReindexKnowledge).toHaveBeenCalledWith("knowledge-source-1");
+    expect(screen.queryByText("Stale indexed passage.")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete Handbook" }));
+    expect(onDeleteKnowledge).toHaveBeenCalledWith("knowledge-source-1");
+  });
+
+  it("imports pasted knowledge and searches lexical matches", async () => {
+    const user = userEvent.setup();
+    const onImportKnowledge = vi.fn().mockResolvedValue(true);
+    const onSearchKnowledge = vi.fn().mockResolvedValue([{
+      citationId: "knowledge:source-1:chunk-1",
+      sourceId: "source-1",
+      chunkId: "chunk-1",
+      title: "Launch plan",
+      sourceType: "document",
+      chunkIndex: 0,
+      text: "The amber readiness review happens Thursday.",
+      score: 2.1,
+    }]);
+    render(<MemoryPage state={dashboardState()} onAdd={vi.fn()} onDelete={vi.fn()} onImportKnowledge={onImportKnowledge} onSearchKnowledge={onSearchKnowledge} />);
+    await user.click(screen.getByRole("tab", { name: /Knowledge/ }));
+    await user.type(screen.getByLabelText("Title"), "Launch plan");
+    await user.type(screen.getByLabelText("Content"), "The amber readiness review happens Thursday.");
+    await user.click(screen.getByRole("button", { name: "Import and index" }));
+    expect(onImportKnowledge).toHaveBeenCalledWith({ title: "Launch plan", content: "The amber readiness review happens Thursday.", sourceType: "document", location: undefined, mimeType: undefined });
+    expect(screen.getByLabelText("Title")).toHaveValue("");
+
+    await user.type(screen.getByLabelText("Search knowledge"), "amber readiness");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    expect(onSearchKnowledge).toHaveBeenCalledWith("amber readiness");
+    expect(await screen.findByText("The amber readiness review happens Thursday.")).toBeVisible();
+    expect(screen.getByText("knowledge:source-1:chunk-1")).toBeVisible();
+    await user.type(screen.getByLabelText("Search knowledge"), " changed");
+    expect(screen.queryByText("knowledge:source-1:chunk-1")).not.toBeInTheDocument();
   });
 });

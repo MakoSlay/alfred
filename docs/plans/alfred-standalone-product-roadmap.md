@@ -522,6 +522,8 @@ Knowledge can have deep subviews, but it lives under Memory.
 
 ## Phase 5 — Knowledge/RAG MVP Built Into the Memory Taxonomy
 
+**Status: lexical MVP implemented on 2026-07-14.** Alfred persists private source metadata and deterministic chunks in `~/.alfred/knowledge/`, supports Text/Markdown import, deletion, reindexing, lexical search, the read-only `search_knowledge` tool, the confirmation-gated `import_knowledge` tool for workspace files and clearly labeled assistant-created notes, validated request-scoped citations, and Knowledge-tab source management. Ollama embeddings and `embeddings.jsonl` remain deliberately deferred until lexical retrieval is proven in daily use.
+
 ### Goal
 
 Add local document/source retrieval without overbuilding a vector database platform.

@@ -1,6 +1,9 @@
 import type {
   BaseMemoryRecord,
+  KnowledgeCitation,
+  KnowledgeSearchMatch,
   KnowledgeSourceRecord,
+  KnowledgeSourceType,
   MemoryDashboardState,
   MemoryKind,
   MemoryProvenance,
@@ -35,7 +38,10 @@ export type TtsSettingsPatch = Omit<Partial<TtsSettings>, "hasFishApiKey" | "las
 
 export type {
   BaseMemoryRecord,
+  KnowledgeCitation,
+  KnowledgeSearchMatch,
   KnowledgeSourceRecord,
+  KnowledgeSourceType,
   MemoryDashboardState,
   MemoryKind,
   MemoryProvenance,
@@ -155,5 +161,20 @@ export interface AskResponse {
   requiresConfirmation?: boolean;
   confirmationPrompt?: string;
   confirmationId?: string;
+  citations?: KnowledgeCitation[];
   tools?: ToolContract[];
+}
+
+export interface KnowledgeImportRequest {
+  title: string;
+  content: string;
+  sourceType: KnowledgeSourceType;
+  location?: string;
+  mimeType?: string;
+}
+
+export interface KnowledgeSearchResponse {
+  ok: true;
+  query: string;
+  matches: KnowledgeSearchMatch[];
 }

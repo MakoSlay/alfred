@@ -32,6 +32,12 @@ export function createConfirmationPreview(toolCall: AlfredToolCall, cwd?: string
 			return `[REMEMBER] ${toolCall.key} = ${toolCall.value}`;
 		case "recall":
 			return `[RECALL] ${toolCall.query ?? "all facts"}`;
+		case "search_knowledge":
+			return `[SEARCH_KNOWLEDGE] ${toolCall.query}`;
+		case "import_knowledge":
+			return toolCall.path
+				? `[IMPORT_KNOWLEDGE]\nFile: ${toolCall.path}\nTitle: ${toolCall.title ?? "from filename"}${cwdLine}`
+				: `[IMPORT_KNOWLEDGE — ASSISTANT CREATED]\nTitle: ${toolCall.title}\nContent (${Buffer.byteLength(toolCall.content ?? "", "utf8")} bytes):\n${toolCall.content ?? ""}`;
 		case "set_voice_settings":
 			return `[VOICE_SETTINGS] ${JSON.stringify({ fishSpeed: toolCall.fishSpeed, edgeRate: toolCall.edgeRate, speechStyle: toolCall.speechStyle, witLevel: toolCall.witLevel, sarcasmLevel: toolCall.sarcasmLevel, provider: toolCall.provider, fallbackProvider: toolCall.fallbackProvider })}`;
 		case "refresh_context":

@@ -11,6 +11,7 @@ import { speak, notify, getTtsSettings, updateTtsSettings, setSpeechSuppressionP
 import { createHistoryStore, formatHistoryForContext, getDefaultHistoryStore } from "./history.ts";
 import { createSessionMemory, getSessionMemoryRecords } from "./memory.ts";
 import { createProfileStore, getDefaultProfileStore } from "./profile.ts";
+import { createKnowledgeStore, getDefaultKnowledgeDirectory } from "./knowledge.ts";
 import type { MemoryDashboardState, ProfileMemoryRecord } from "./memory-types.ts";
 import { serveDashboardAsset } from "./dashboard-assets.ts";
 import { createAlfredEventBus, type AlfredEventBus } from "./events.ts";
@@ -50,6 +51,8 @@ export interface Alfred2Config {
 	profileFile?: string;
 	/** Optional isolated durable activity-history path for embedded runtimes and tests. */
 	historyFile?: string;
+	/** Optional isolated knowledge directory for embedded runtimes and tests. */
+	knowledgeDirectory?: string;
 }
 
 export interface Alfred2ServerHandle {
@@ -217,6 +220,36 @@ const TOOL_CONTRACTS: DashboardToolContract[] = [
 			'{ "tool": "recall", "query": "theme" }',
 		],
 		confirm: "none",
+	},
+	{
+		name: "search_knowledge",
+		description: "Search indexed local Text and Markdown sources with deterministic lexical ranking.",
+		schema: {
+			tool: "search_knowledge",
+			query: "string",
+			topK: "optional number 1-10",
+			sourceId: "optional source id",
+		},
+		examples: [
+			'{ "tool": "search_knowledge", "query": "release checklist", "topK": 5 }',
+		],
+		confirm: "none",
+	},
+	{
+		name: "import_knowledge",
+		description: "Import a workspace Text/Markdown file or save explicitly requested assistant-created content into local Knowledge.",
+		schema: {
+			tool: "import_knowledge",
+			path: "workspace-relative .txt/.md path, mutually exclusive with content",
+			content: "assistant-created content, mutually exclusive with path",
+			title: "optional for path; required for content",
+			sourceType: "optional document|note|project",
+		},
+		examples: [
+			'{ "tool": "import_knowledge", "path": "docs/handbook.md", "title": "Team handbook" }',
+			'{ "tool": "import_knowledge", "title": "Release research", "content": "# Findings\\n...", "sourceType": "note" }',
+		],
+		confirm: "confirm",
 	},
 	{
 		name: "set_voice_settings",
@@ -393,10 +426,12 @@ const TOOL_CONTRACTS: DashboardToolContract[] = [
 ];
 
 export async function startAlfred2(config: Alfred2Config): Promise<Alfred2ServerHandle> {
+	if (!isLoopbackHost(config.host)) throw new Error(`Alfred 2 must bind to a loopback host, not ${config.host}.`);
 	const llmClient = config.llm.llmClient ?? (config.agent ? createAgentBackedLlmClient(config.agent) : createOpenAiCompatibleLlmClient(config.llm));
 	const sessionId = `session-${randomUUID()}`;
 	const sessionMemory = createSessionMemory();
 	const profileStore = config.profileFile ? createProfileStore(config.profileFile) : getDefaultProfileStore();
+	const knowledgeStore = createKnowledgeStore(config.knowledgeDirectory ?? (config.profileFile ? join(dirname(config.profileFile), "knowledge") : getDefaultKnowledgeDirectory()));
 	const historyStore = config.historyFile ? createHistoryStore(config.historyFile) : getDefaultHistoryStore();
 	const { loadHistory, addHistoryEntry, getRecentHistory, searchHistory, saveHistory } = historyStore;
 	const confirmationStore = new PendingConfirmationStore<AlfredToolCall>();
@@ -514,6 +549,7 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 			provenance: { ...fact.provenance },
 		}));
 		const sessionRecords = getSessionMemoryRecords(sessionMemory);
+		const knowledgeSources = knowledgeStore.listSources();
 		const undoHistory = getUndoHistory();
 		const recentResponses = getRecentHistory(8)
 			.filter((entry) => (entry.displayText || entry.speech || "").trim().length > 0)
@@ -550,7 +586,7 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 					currentContextTokens: sessionMemory.currentContextTokens,
 					cumulativeTotalTokens: sessionMemory.cumulativeTotalTokens,
 				},
-				knowledge: { persistent: true, available: false, count: 0, sources: [] },
+				knowledge: { persistent: true, available: true, count: knowledgeSources.length, sources: knowledgeSources },
 			},
 			undoCount: undoHistory.length,
 			undoHistory,
@@ -612,6 +648,11 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 
 	async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? config.host}`);
+		if (isKnowledgeApiPath(url.pathname) && !isAllowedKnowledgeOrigin(req.headers.origin)) {
+			res.writeHead(403, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ ok: false, error: "Knowledge API requests must originate from a loopback origin." }));
+			return;
+		}
 
 		// Health
 		if (req.method === "GET" && url.pathname === "/health") {
@@ -799,6 +840,84 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 					: { ok: false, removed: false, error: "Profile memory not found." }));
 				return;
 			}
+		}
+
+		// Import Text/Markdown into the local lexical knowledge index. The /api/memory
+		// routes are canonical; dashboard aliases remain convenient for existing clients.
+		if (req.method === "GET" && (url.pathname === "/api/memory/knowledge/sources" || url.pathname === "/dashboard/knowledge/sources")) {
+			const sources = knowledgeStore.listSources();
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ ok: true, count: sources.length, sources }));
+			return;
+		}
+
+		if (req.method === "POST" && (url.pathname === "/api/memory/knowledge/sources" || url.pathname === "/dashboard/knowledge/sources")) {
+			const body = await readKnowledgeJsonBody(req);
+			if (body?.sourceType !== undefined && !["document", "note", "project"].includes(String(body.sourceType))) {
+				res.writeHead(400, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ ok: false, error: "Invalid knowledge source type." }));
+				return;
+			}
+			try {
+				const result = knowledgeStore.ingest({
+					title: typeof body?.title === "string" ? body.title : "",
+					content: typeof body?.content === "string" ? body.content : "",
+					sourceType: body?.sourceType === "note" || body?.sourceType === "project" ? body.sourceType : "document",
+					location: typeof body?.location === "string" ? body.location : undefined,
+					mimeType: typeof body?.mimeType === "string" ? body.mimeType : undefined,
+				});
+				res.writeHead(result.created ? 201 : 200, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ ok: true, ...result }));
+			} catch (cause) {
+				res.writeHead(400, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }));
+			}
+			return;
+		}
+
+		if (req.method === "DELETE") {
+			const sourceMatch = url.pathname.match(/^\/(?:api\/memory|dashboard)\/knowledge\/sources\/([^/]+)$/);
+			if (sourceMatch) {
+				const id = decodeURIComponent(sourceMatch[1] ?? "");
+				const removed = knowledgeStore.deleteSource(id);
+				res.writeHead(removed ? 200 : 404, { "Content-Type": "application/json" });
+				res.end(JSON.stringify(removed ? { ok: true, removed: true, id } : { ok: false, removed: false, error: "Knowledge source not found." }));
+				return;
+			}
+		}
+
+		if (req.method === "POST") {
+			const reindexMatch = url.pathname.match(/^\/(?:api\/memory|dashboard)\/knowledge\/sources\/([^/]+)\/reindex$/);
+			if (reindexMatch) {
+				const id = decodeURIComponent(reindexMatch[1] ?? "");
+				const body = await readKnowledgeJsonBody(req);
+				try {
+					const source = knowledgeStore.reindexSource(id, typeof body?.content === "string" ? body.content : undefined);
+					res.writeHead(source ? 200 : 404, { "Content-Type": "application/json" });
+					res.end(JSON.stringify(source ? { ok: true, source } : { ok: false, error: "Knowledge source not found." }));
+				} catch (cause) {
+					res.writeHead(400, { "Content-Type": "application/json" });
+					res.end(JSON.stringify({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }));
+				}
+				return;
+			}
+		}
+
+		if (req.method === "POST" && (url.pathname === "/api/memory/knowledge/search" || url.pathname === "/dashboard/knowledge/search")) {
+			const body = await readKnowledgeJsonBody(req);
+			const query = typeof body?.query === "string" ? body.query.trim() : "";
+			if (!query) {
+				res.writeHead(400, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ ok: false, error: "query is required" }));
+				return;
+			}
+			const matches = knowledgeStore.search(query, {
+				limit: typeof body?.limit === "number" ? body.limit : undefined,
+				sourceId: typeof body?.sourceId === "string" ? body.sourceId : undefined,
+			});
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ ok: true, query, matches }));
+			return;
 		}
 
 		// Mute endpoints
@@ -1121,6 +1240,7 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 				sessionId,
 				turnId,
 				profileStore,
+				knowledgeStore,
 				confirm: body?.confirm === true,
 				confirmationId: typeof body?.confirmationId === "string" ? body.confirmationId : undefined,
 				autoConfirm,
@@ -1207,6 +1327,7 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 				confirmationId: loopResult.confirmationId,
 				commandResult: loopResult.commandResult ?? undefined,
 				toolResults: loopResult.toolResults,
+				citations: loopResult.citations,
 				muted: isMuted(),
 				timing: { contextMs, agentMs, speechFormatterMs, totalMs: contextMs + agentMs + speechFormatterMs },
 				tokens: { context: contextTokens, currentPrompt: loopResult.currentContextTokens, maxPrompt: loopResult.maxContextTokens, saved: savedTokens, llm: loopResult.usage, speechFormatter: speechFormatter.usage, speechFormatterInputEstimate: speechFormatter.inputTokensEstimate, session: loopResult.sessionTokens },
@@ -1258,7 +1379,7 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 				res.destroy();
 				return;
 			}
-			res.writeHead(500, { "Content-Type": "application/json" });
+			res.writeHead(cause instanceof HttpRequestError ? cause.statusCode : 500, { "Content-Type": "application/json" });
 			res.end(JSON.stringify({ ok: false, error: message }));
 		});
 	});
@@ -1436,11 +1557,57 @@ function publishSpeechEvent(eventBus: AlfredEventBus, requestId: string, event: 
 	else eventBus.publish({ type: "speech:error", requestId, provider: event.provider, message: event.message ?? "Speech failed" });
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | null> {
-	return new Promise((resolve) => {
+class HttpRequestError extends Error {
+	readonly statusCode: number;
+
+	constructor(statusCode: number, message: string) {
+		super(message);
+		this.statusCode = statusCode;
+	}
+}
+
+function isLoopbackHost(host: string): boolean {
+	return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+}
+
+function isKnowledgeApiPath(pathname: string): boolean {
+	return pathname.startsWith("/api/memory/knowledge/") || pathname.startsWith("/dashboard/knowledge/");
+}
+
+function isAllowedKnowledgeOrigin(origin: string | undefined): boolean {
+	if (!origin) return true;
+	try {
+		return isLoopbackHost(new URL(origin).hostname);
+	} catch {
+		return false;
+	}
+}
+
+async function readKnowledgeJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | null> {
+	const contentType = req.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+	if (contentType !== "application/json") throw new HttpRequestError(415, "Knowledge API requests require Content-Type: application/json.");
+	return readJsonBody(req, 5 * 1024 * 1024);
+}
+
+async function readJsonBody(req: IncomingMessage, maxBytes = Number.POSITIVE_INFINITY): Promise<Record<string, unknown> | null> {
+	return new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
-		req.on("data", (chunk: Buffer) => chunks.push(chunk));
+		let bytes = 0;
+		let tooLarge = false;
+		req.on("data", (chunk: Buffer) => {
+			bytes += chunk.length;
+			if (bytes > maxBytes) {
+				tooLarge = true;
+				chunks.length = 0;
+				return;
+			}
+			if (!tooLarge) chunks.push(chunk);
+		});
 		req.on("end", () => {
+			if (tooLarge) {
+				reject(new HttpRequestError(413, `Request body exceeds ${maxBytes} bytes.`));
+				return;
+			}
 			try {
 				const raw = Buffer.concat(chunks).toString("utf-8");
 				resolve(raw ? JSON.parse(raw) : null);

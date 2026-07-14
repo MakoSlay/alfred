@@ -172,9 +172,11 @@ test("dashboard state and tools endpoints expose live controls", async () => {
 		const tools = await toolsResponse.json() as { ok: boolean; count: number; names: string[]; contracts: Array<{ name: string }> };
 		assert.equal(toolsResponse.status, 200);
 		assert.equal(tools.ok, true);
-		assert.equal(tools.count, 24);
+		assert.equal(tools.count, 26);
 		assert.equal(tools.names.includes("bash"), true);
 		assert.equal(tools.contracts.some((contract) => contract.name === "remember"), true);
+		assert.equal(tools.contracts.some((contract) => contract.name === "search_knowledge"), true);
+		assert.equal(tools.contracts.some((contract) => contract.name === "import_knowledge"), true);
 		assert.equal(tools.contracts.some((contract) => contract.name === "set_voice_settings"), true);
 		assert.equal(tools.contracts.some((contract) => contract.name === "refresh_context"), true);
 		assert.equal(tools.contracts.some((contract) => contract.name === "inspect_session"), true);
@@ -205,7 +207,7 @@ test("dashboard state and tools endpoints expose live controls", async () => {
 		assert.equal(state.ok, true);
 		assert.equal(state.autoConfirm, true);
 		assert.equal(state.toolRounds, 0);
-		assert.equal(state.tools.count, 24);
+		assert.equal(state.tools.count, 26);
 		assert.equal(state.listener.provider, "off");
 		assert.equal(state.listener.running, false);
 		assert.equal(state.recentResponses.some((entry) => entry.requestId === "req-dashboard-recall" && entry.userText === "please leave a previous response marker" && entry.responseText === "Done, sir."), true);

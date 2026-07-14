@@ -397,7 +397,7 @@ test("dashboard state is additive and profile deletion uses the stable memory ID
 		assert.equal(state.memory.profile.records[0]?.kind, "profile");
 		assert.equal(state.memory.session.ephemeral, true);
 		assert.deepEqual(state.memory.session.records, []);
-		assert.equal(state.memory.knowledge.available, false);
+		assert.equal(state.memory.knowledge.available, true);
 		assert.deepEqual(state.memory.knowledge.sources, []);
 
 		const deleteResponse = await fetch(`${baseUrl}/dashboard/facts/${encodeURIComponent(created.fact.id)}`, { method: "DELETE" });

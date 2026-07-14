@@ -1,6 +1,9 @@
 import type {
   AskResponse,
   DashboardState,
+  KnowledgeImportRequest,
+  KnowledgeSearchResponse,
+  KnowledgeSourceRecord,
   ProfileFact,
   ToolsResponse,
   TtsSettings,
@@ -54,6 +57,14 @@ export const alfredApi = {
     request<{ ok: true; fact: ProfileFact }>("/dashboard/facts", jsonInit("POST", fact)),
   deleteFact: (id: string) =>
     request<{ ok: true; removed: true; id: string }>(`/dashboard/facts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  importKnowledge: (input: KnowledgeImportRequest) =>
+    request<{ ok: true; source: KnowledgeSourceRecord; created: boolean }>("/api/memory/knowledge/sources", jsonInit("POST", input)),
+  deleteKnowledge: (id: string) =>
+    request<{ ok: true; removed: true; id: string }>(`/api/memory/knowledge/sources/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  reindexKnowledge: (id: string) =>
+    request<{ ok: true; source: KnowledgeSourceRecord }>(`/api/memory/knowledge/sources/${encodeURIComponent(id)}/reindex`, jsonInit("POST", {})),
+  searchKnowledge: (query: string, limit = 5) =>
+    request<KnowledgeSearchResponse>("/api/memory/knowledge/search", jsonInit("POST", { query, limit })),
   restoreUndo: (id: string) =>
     request<{ ok: true; originalPath: string }>(`/dashboard/undo/${encodeURIComponent(id)}`, { method: "POST" }),
   clearUndo: () => request<{ ok: true; removed: number }>("/dashboard/undo", { method: "DELETE" }),

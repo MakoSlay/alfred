@@ -73,9 +73,9 @@ Vite runs at `http://127.0.0.1:5173/dashboard/` and proxies the existing Alfred 
 
 - **Profile** facts are durable in `~/.alfred/profile.json`, carry stable IDs and write-time provenance, and are managed from the Memory page or the compatible `remember`/`recall` tools.
 - **Session** taxonomy records are sanitized, bounded, and process-scoped. Alfred's separate durable activity history may retain bounded request/response and tool metadata.
-- **Knowledge** currently defines source metadata and its Memory tab only; ingestion and retrieval are deferred to Phase 5.
+- **Knowledge** imports local Text/Markdown content into `~/.alfred/knowledge/sources.json` and deterministic chunks in `chunks.jsonl`. Retrieval is lexical-first, source deletion/reindexing are supported, and `search_knowledge` returns request-scoped citations. The confirmation-gated `import_knowledge` tool can import a workspace file through conversation or save explicitly requested assistant-created notes, which are visibly labeled. Embeddings remain intentionally deferred.
 
-Profile and history files are stored with owner-only permissions. Dashboard profile writes use `POST /dashboard/facts`; stable-ID deletion uses `DELETE /dashboard/facts/:id`. `/dashboard/state` exposes canonical grouped memory state while retaining the legacy `profileFacts` and `memoryTurns` fields during migration.
+Profile, history, and knowledge files are stored with owner-only permissions. Dashboard profile writes use `POST /dashboard/facts`; stable-ID deletion uses `DELETE /dashboard/facts/:id`. Knowledge sources use `GET/POST /api/memory/knowledge/sources`, `DELETE /api/memory/knowledge/sources/:id`, `POST /api/memory/knowledge/sources/:id/reindex`, and `POST /api/memory/knowledge/search` (with compatible `/dashboard/knowledge/*` aliases). Imports are limited to 2 MiB per source, 200 sources, and 50 MiB total; knowledge mutations require JSON from a loopback origin. `/dashboard/state` exposes canonical grouped memory state while retaining the legacy `profileFacts` and `memoryTurns` fields during migration.
 
 Alfred 2 speed knobs:
 

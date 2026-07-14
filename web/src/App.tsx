@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { alfredApi } from "./api/client";
-import type { DashboardState, ProfileFact, ToolContract, TtsSettingsPatch } from "./api/types";
+import type { DashboardState, KnowledgeImportRequest, KnowledgeSearchMatch, ProfileFact, ToolContract, TtsSettingsPatch } from "./api/types";
 import { AppShell, type PageId } from "./components/AppShell";
 import { MemoryPage } from "./pages/MemoryPage";
 import { RadarPage } from "./pages/RadarPage";
@@ -143,6 +143,38 @@ export default function App() {
     });
   }
 
+  async function importKnowledge(input: KnowledgeImportRequest): Promise<boolean> {
+    return runAction(async () => {
+      const result = await alfredApi.importKnowledge(input);
+      return result.created ? `Indexed ${result.source.title}.` : `${result.source.title} was already indexed.`;
+    });
+  }
+
+  async function deleteKnowledge(id: string): Promise<boolean> {
+    return runAction(async () => { await alfredApi.deleteKnowledge(id); return "Knowledge source deleted."; });
+  }
+
+  async function reindexKnowledge(id: string): Promise<boolean> {
+    return runAction(async () => { const result = await alfredApi.reindexKnowledge(id); return `Reindexed ${result.source.title}.`; });
+  }
+
+  async function searchKnowledge(query: string): Promise<KnowledgeSearchMatch[]> {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await alfredApi.searchKnowledge(query);
+      setNotice(result.matches.length ? `Found ${result.matches.length} knowledge match${result.matches.length === 1 ? "" : "es"}.` : "No knowledge matches found.");
+      return result.matches;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      setNotice(message);
+      return [];
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function restoreUndo(id: string) {
     await runAction(async () => { const result = await alfredApi.restoreUndo(id); return `Restored ${result.originalPath}.`; });
   }
@@ -185,7 +217,7 @@ export default function App() {
   switch (page) {
     case "radar": content = <RadarPage busy={busy} events={events} onAsk={ask} state={state} />; break;
     case "voice": content = <VoicePage connection={connection} latestEvent={latestEvent} onSave={saveTts} onTest={testTts} settings={state.tts} />; break;
-    case "memory": content = <MemoryPage onAdd={addFact} onDelete={deleteFact} state={state} />; break;
+    case "memory": content = <MemoryPage onAdd={addFact} onDelete={deleteFact} onDeleteKnowledge={deleteKnowledge} onImportKnowledge={importKnowledge} onReindexKnowledge={reindexKnowledge} onSearchKnowledge={searchKnowledge} state={state} />; break;
     case "safety": content = <SafetyPage onClear={clearUndo} onRestore={restoreUndo} onToggleAutoConfirm={toggleAutoConfirm} onToggleMute={toggleMute} state={state} />; break;
     case "tools": content = <ToolsPage events={events} onAskCapabilities={() => ask("what can you do?")} tools={tools} />; break;
     case "settings": content = <SettingsPage connection={connection} onThemeChange={setTheme} state={state} theme={theme} />; break;

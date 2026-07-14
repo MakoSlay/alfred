@@ -121,7 +121,10 @@ export function classifyToolRisk(toolCall: AlfredToolCall): RiskClassification {
 		case "remember":
 			return { risk: "mutation", confirmation: "none" };
 		case "recall":
+		case "search_knowledge":
 			return { risk: "read", confirmation: "none" };
+		case "import_knowledge":
+			return { risk: "mutation", confirmation: "confirm" };
 		case "set_voice_settings":
 			return { risk: "mutation", confirmation: "none" };
 		case "refresh_context":
