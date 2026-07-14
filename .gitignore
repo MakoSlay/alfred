@@ -1,5 +1,7 @@
 node_modules/
 dist/
+*.tsbuildinfo
+.pi-subagents/
 coverage/
 .env
 .env.*

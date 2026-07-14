@@ -26,7 +26,7 @@ import { DEFAULT_DRAFT_TTL_MS, redactedText, sourceHasCapabilities } from "../co
 import { createCmuxWorldModelAdapter, type CmuxResult, type CmuxWorldModelAdapter } from "../cmux/index.ts";
 import { renderDashboardHtml } from "../dashboard/index.ts";
 import { formatHostForUrl } from "../lib/host-formatting.ts";
-import { buildPlannerInput, plannerInputSummary, validatePlannerResult, type AlfredPlanner, type AlfredPlannerResult } from "../planner/index.ts";
+import { buildPlannerInput, plannerInputSummary, validatePlannerResult, type AlfredPlanner, type AlfredPlannerIntent, type AlfredPlannerResult } from "../planner/index.ts";
 import { createAlfredLoopManager, type AlfredLoopDecision, type AlfredLoopManager, type AlfredLoopRuntimeState, type AlfredLoopScheduler, type AlfredLoopStartRequest } from "../loops/index.ts";
 import { createJsonFileStorage, defaultAlfredStorageDir, type AlfredStorageAdapter } from "../storage/index.ts";
 import { createActionRegistry, registerBuiltinActions, type ActionRegistry } from "../actions/index.ts";
@@ -51,9 +51,10 @@ export interface AlfredDaemonStateSnapshot {
 	targetAliases: AlfredTargetAlias[];
 	events: AlfredEvent[];
 	storageWarnings?: string[];
+	mutedUntil?: string;
 }
 
-type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace" | "sendKeyToSurface" | "openDiff" | "openMarkdown" | "openUrl" | "openBrowserSurface" | "listNotifications">;
+type AlfredDaemonCmux = Pick<CmuxWorldModelAdapter, "listTargets" | "readSurface" | "sendTextToSurface" | "sendTextToWorkspace" | "sendKeyToSurface" | "openDiff" | "openMarkdown" | "openFile" | "openUrl" | "openBrowserSurface" | "listNotifications">;
 
 export interface AlfredDaemonDependencies {
 	cmux?: AlfredDaemonCmux;
@@ -129,6 +130,7 @@ interface DaemonState {
 	actions: ActionRegistry;
 	storage?: AlfredStorageAdapter;
 	storageWarnings: string[];
+	mutedUntil: IsoTimestamp | null;
 }
 
 export function defaultDaemonConfig(overrides: Partial<AlfredDaemonConfig> = {}): AlfredDaemonConfig {
@@ -156,7 +158,7 @@ export function createAlfredDaemon(
 	const now = dependencies.now ?? (() => new Date());
 	const actions = createActionRegistry({ now, nextId, defaultTtlMs: DEFAULT_DRAFT_TTL_MS });
 	registerBuiltinActions(actions);
-	const state: DaemonState = { recentTargets: [], targetAliases: [], events: [], actions, storage, storageWarnings: [] };
+	const state: DaemonState = { recentTargets: [], targetAliases: [], events: [], actions, storage, storageWarnings: [], mutedUntil: null };
 	const planner = dependencies.planner;
 	const loopManager = dependencies.loopManager ?? createAlfredLoopManager({ cmux, now, nextId, decide: dependencies.loopDecider, scheduler: dependencies.loopScheduler });
 	const server = http.createServer((request, response) => {
@@ -288,7 +290,7 @@ async function handleDaemonRequest(
 			return;
 		}
 		const result = await handleRequest(body.value, state, cmux, now, planner);
-		writeJson(response, result.ok ? 200 : 400, result);
+		writeJson(response, result.ok ? 200 : 400, stripSpeechIfMuted(result, state));
 		return;
 	}
 
@@ -366,6 +368,39 @@ async function handleDaemonRequest(
 		return;
 	}
 
+	if (request.method === "POST" && url.pathname === "/mute") {
+		const body = await readJsonBody<{ durationMs?: unknown }>(request, config.maxBodyBytes);
+		if (!body.ok) {
+			writeJson(response, 400, { ok: false, error: { code: "invalid_request", message: body.error, retryable: false } });
+			return;
+		}
+		const durationMs = typeof body.value?.durationMs === "number" && Number.isFinite(body.value.durationMs) ? body.value.durationMs : 0;
+		if (durationMs <= 0 || durationMs > 24 * 3600 * 1000) {
+			writeJson(response, 400, { ok: false, error: { code: "invalid_request", message: "durationMs must be between 1 ms and 24 hours.", retryable: false } });
+			return;
+		}
+		state.mutedUntil = new Date(now().getTime() + durationMs).toISOString();
+		writeJson(response, 200, { ok: true, muted: true, mutedUntil: state.mutedUntil, durationMs });
+		return;
+	}
+
+	if (request.method === "POST" && url.pathname === "/unmute") {
+		state.mutedUntil = null;
+		writeJson(response, 200, { ok: true, muted: false });
+		return;
+	}
+
+	if (request.method === "GET" && url.pathname === "/mute/status") {
+		const nowIso = now().toISOString();
+		if (state.mutedUntil && state.mutedUntil <= nowIso) {
+			state.mutedUntil = null; // auto-expired
+		}
+		const muted = state.mutedUntil !== null;
+		const remainingMs = muted ? Math.max(0, new Date(state.mutedUntil!).getTime() - now().getTime()) : null;
+		writeJson(response, 200, { ok: true, muted, mutedUntil: state.mutedUntil, remainingMs });
+		return;
+	}
+
 	writeJson(response, 404, { ok: false, error: { code: "not_found", message: "Route not found", retryable: false } });
 }
 
@@ -401,8 +436,16 @@ async function handleRequest(
 	if (!inputText) {
 		return invalidRequestResponse(request.requestId, now().toISOString(), "input.text is required");
 	}
+	// Auto-expire mute if past due
+	if (state.mutedUntil && state.mutedUntil <= now().toISOString()) {
+		state.mutedUntil = null;
+	}
+	const isMuted = state.mutedUntil !== null;
 	const effectiveSource = applyAllowedCapabilities(request.source, request.policy?.allowedCapabilities);
 	const preWorldRoute = routeAskBeforeWorld(inputText);
+	if (preWorldRoute.kind === "mute" || preWorldRoute.kind === "unmute" || preWorldRoute.kind === "mute_status") {
+		return handlePreWorldMute(preWorldRoute, request, effectiveSource, state, now);
+	}
 	if (preWorldRoute.kind === "confirm") {
 		return await confirmDraft({ requestId: request.requestId, source: effectiveSource }, state, cmux, now);
 	}
@@ -421,6 +464,9 @@ async function handleRequest(
 	const route = routeAskWithWorld({ inputText, targets: targets.value, currentWorkspaceRef: request.context?.currentWorkspaceRef, aliases: state.targetAliases, recentTargets: state.recentTargets });
 	if (route.kind === "list_targets") {
 		return createTargetsAnswerResponse(request, effectiveSource, targets.value, state, now);
+	}
+	if (route.kind === "list_active_tabs") {
+		return createActiveTabsAnswerResponse(request, effectiveSource, targets.value, state, now, request.context?.currentWorkspaceRef);
 	}
 	if (route.kind === "current_workspace") {
 		return createCurrentWorkspaceAnswerResponse(request, effectiveSource, targets.value, state, now, request.context?.currentWorkspaceRef);
@@ -457,21 +503,65 @@ async function handleRequest(
 		} catch {
 			plannerResult = validatePlannerResult({ ok: false, errors: [{ code: "llm_unavailable", message: "Planner failed before returning a validated action.", retryable: true }] }, plannerInputSummary(plannerInput.inputText, plannerInput.maxInputChars));
 		}
-		if (plannerResult.ok && plannerResult.intent?.kind === "draft_message") {
-			const resolved = resolvePlannerDraftIntent(plannerResult.intent, targets.value, request.context?.currentWorkspaceRef, state.targetAliases, state.recentTargets);
-			if (resolved.ok && resolved.intent) {
-				return createDraftResponse(request, effectiveSource, resolved.intent, state, now);
-			}
-			return createNoActionResponse(request, effectiveSource, state, now, {
-				errors: resolved.error ? [resolved.error] : [{ code: "target_not_found", message: "Planner draft target could not be resolved.", retryable: false }],
-				plannerSummary: plannerResult.sanitizedInputSummary,
-			});
+		if (plannerResult.ok && plannerResult.intent) {
+			return await executePlannerIntent(request, effectiveSource, state, cmux, now, targets.value, plannerResult.intent, plannerResult.sanitizedInputSummary);
 		}
 		if (!plannerResult.ok) {
 			return createNoActionResponse(request, effectiveSource, state, now, { errors: plannerResult.errors, plannerSummary: plannerResult.sanitizedInputSummary });
 		}
 	}
 	return createNoActionResponse(request, effectiveSource, state, now);
+}
+
+async function executePlannerIntent(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	state: DaemonState,
+	cmux: AlfredDaemonCmux,
+	now: () => Date,
+	targets: AlfredTarget[],
+	intent: AlfredPlannerIntent,
+	plannerSummary: RedactedText,
+): Promise<AlfredHandleResponse> {
+	if (intent.kind === "none") {
+		return createNoActionResponse(request, source, state, now);
+	}
+	if (intent.kind === "draft_message" || intent.kind === "draft_message_to_target") {
+		const resolved = resolvePlannerDraftIntent(intent, targets, request.context?.currentWorkspaceRef, state.targetAliases, state.recentTargets);
+		if (resolved.ok && resolved.intent) {
+			return createDraftResponse(request, source, resolved.intent, state, now);
+		}
+		return createClarificationResponse(request, source, plannerDraftResolutionClarification(resolved.error, resolved.candidates), state, now);
+	}
+	if (intent.kind === "list_targets") {
+		return createTargetsAnswerResponse(request, source, targets, state, now);
+	}
+	const safeAction = plannerSafeAction(intent);
+	if (safeAction) {
+		return await executeSafeAction(request, source, state, cmux, now, safeAction.actionId, safeAction.input);
+	}
+	return createNoActionResponse(request, source, state, now, {
+		errors: [{ code: "unsupported_action", message: "Planner intent kind is not supported by the daemon pipeline.", retryable: false }],
+		plannerSummary,
+	});
+}
+
+function plannerSafeAction(intent: AlfredPlannerIntent): { actionId: string; input: Record<string, unknown> } | null {
+	switch (intent.kind) {
+		case "open_file": return { actionId: "cmux.openFile", input: { path: intent.path } };
+		case "open_markdown": return { actionId: "cmux.openMarkdown", input: { path: intent.path } };
+		case "open_url": return { actionId: "cmux.openUrl", input: { url: intent.url } };
+		case "open_browser": return { actionId: "cmux.openBrowserSurface", input: intent.url ? { url: intent.url } : {} };
+		case "read_notifications": return { actionId: "cmux.readNotifications", input: { filter: intent.filter, countOnly: intent.countOnly } };
+		default: return null;
+	}
+}
+
+function plannerDraftResolutionClarification(error: AlfredError | undefined, candidates: readonly AlfredTarget[] = []): { code: "target_ambiguous" | "target_not_found" | "unsupported_action"; prompt: string; candidates: readonly AlfredTarget[] } {
+	if (!error) return { code: "target_not_found", prompt: "I couldn't resolve the target for that message.", candidates: [] };
+	if (error.code === "target_ambiguous") return { code: "target_ambiguous", prompt: error.message, candidates };
+	if (error.code === "target_not_found") return { code: "target_not_found", prompt: error.message, candidates: [] };
+	return { code: "unsupported_action", prompt: error.message, candidates: [] };
 }
 
 function createTargetsAnswerResponse(
@@ -482,11 +572,10 @@ function createTargetsAnswerResponse(
 	now: () => Date,
 ): AlfredHandleResponse {
 	const createdAt = now().toISOString();
-	const visible = targets.slice(0, 12);
-	const lines = visible.map((target) => `- ${target.label} (${target.kind}, ${target.ref})${target.current ? " — current" : ""}`);
-	const more = targets.length > visible.length ? `\n…and ${targets.length - visible.length} more.` : "";
-	const displayText = targets.length > 0 ? `Visible targets:\n${lines.join("\n")}${more}` : "No cmux targets are visible right now.";
-	const event = pushWorldObservedEvent(state, request.requestId, source, createdAt, `Listed ${targets.length} visible target${targets.length === 1 ? "" : "s"}.`, { targetCount: targets.length });
+	const workspaces = visibleWorkspaceSummaries(targets).slice(0, 5);
+	const lines = workspaces.map((workspace) => `- ${workspace.label}${workspace.current ? " — current" : workspace.selected ? " — selected" : ""}`);
+	const displayText = workspaces.length > 0 ? `Recent workspaces:\n${lines.join("\n")}` : "No cmux workspaces are visible right now.";
+	const event = pushWorldObservedEvent(state, request.requestId, source, createdAt, `Listed ${workspaces.length} recent workspace${workspaces.length === 1 ? "" : "s"}.`, { targetCount: targets.length, workspaceCount: workspaces.length });
 	return {
 		requestId: request.requestId,
 		createdAt,
@@ -494,8 +583,89 @@ function createTargetsAnswerResponse(
 		displayText,
 		proposedActions: [],
 		events: [event],
-		nextStatePatch: visible[0] ? { rememberTarget: visible[0] } : undefined,
+		nextStatePatch: workspaces[0]?.target ? { rememberTarget: workspaces[0].target } : undefined,
 	};
+}
+
+function createActiveTabsAnswerResponse(
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	targets: readonly AlfredTarget[],
+	state: DaemonState,
+	now: () => Date,
+	contextWorkspaceRef?: AlfredRef,
+): AlfredHandleResponse {
+	const createdAt = now().toISOString();
+	const currentWorkspace = currentWorkspaceSummary(targets, contextWorkspaceRef);
+	const tabs = visibleTabTargets(targets)
+		.filter((target) => !currentWorkspace?.ref || target.workspaceRef === currentWorkspace.ref)
+		.slice(0, 3);
+	const lines = tabs.map((target) => {
+		const workspaceSuffix = currentWorkspace?.ref ? "" : ` — ${target.workspaceLabel ?? target.workspaceRef ?? "unknown workspace"}`;
+		return `- ${target.label}${workspaceSuffix}${target.current ? " — current" : target.selected ? " — selected" : ""}`;
+	});
+	const scope = currentWorkspace?.label ?? currentWorkspace?.ref;
+	const displayText = tabs.length > 0
+		? `${scope ? `Recent active tabs in ${scope}` : "Recent active tabs across workspaces"}:\n${lines.join("\n")}`
+		: `${scope ? `No active tabs are visible in ${scope}.` : "No active tabs are visible right now."}`;
+	const event = pushWorldObservedEvent(state, request.requestId, source, createdAt, `Listed ${tabs.length} active tab${tabs.length === 1 ? "" : "s"}.`, { targetCount: targets.length, tabCount: tabs.length, workspaceRef: currentWorkspace?.ref ?? null });
+	return {
+		requestId: request.requestId,
+		createdAt,
+		ok: true,
+		displayText,
+		proposedActions: [],
+		events: [event],
+		nextStatePatch: tabs[0] ? { rememberTarget: tabs[0] } : undefined,
+	};
+}
+
+interface WorkspaceSummary {
+	label: string;
+	ref?: AlfredRef;
+	current: boolean;
+	selected: boolean;
+	target?: AlfredTarget;
+}
+
+function visibleWorkspaceSummaries(targets: readonly AlfredTarget[]): WorkspaceSummary[] {
+	const summaries = new Map<string, WorkspaceSummary & { firstSeen: number }>();
+	targets.forEach((target, index) => {
+		const ref = target.kind === "cmux-workspace" ? target.ref : target.workspaceRef;
+		const label = target.kind === "cmux-workspace" ? target.label : target.workspaceLabel;
+		if (!ref && !label) return;
+		const key = ref ?? normalizeForMatch(label ?? "");
+		const existing = summaries.get(key);
+		const next: WorkspaceSummary & { firstSeen: number } = existing ?? { label: label ?? ref ?? "Unknown workspace", ref, current: false, selected: false, firstSeen: index };
+		next.label = existing?.label ?? label ?? ref ?? "Unknown workspace";
+		next.ref = existing?.ref ?? ref;
+		next.current ||= Boolean(target.current);
+		next.selected ||= Boolean(target.selected);
+		if (!next.target || target.kind === "cmux-workspace") next.target = target;
+		summaries.set(key, next);
+	});
+	return [...summaries.values()]
+		.sort((left, right) => activityRank(right) - activityRank(left) || left.firstSeen - right.firstSeen)
+		.map(({ firstSeen: _firstSeen, ...summary }) => summary);
+}
+
+function visibleTabTargets(targets: readonly AlfredTarget[]): AlfredTarget[] {
+	return targets
+		.map((target, index) => ({ target, index }))
+		.filter(({ target }) => target.kind !== "cmux-workspace" && Boolean(target.surfaceRef ?? target.ref))
+		.sort((left, right) => activityRank(right.target) - activityRank(left.target) || left.index - right.index)
+		.map(({ target }) => target);
+}
+
+function currentWorkspaceSummary(targets: readonly AlfredTarget[], contextWorkspaceRef?: AlfredRef): WorkspaceSummary | undefined {
+	const workspaces = visibleWorkspaceSummaries(targets);
+	return (contextWorkspaceRef ? workspaces.find((workspace) => workspace.ref === contextWorkspaceRef) : undefined)
+		?? workspaces.find((workspace) => workspace.current)
+		?? workspaces.find((workspace) => workspace.selected);
+}
+
+function activityRank(value: { current?: boolean; selected?: boolean }): number {
+	return (value.current ? 2 : 0) + (value.selected ? 1 : 0);
 }
 
 function createCurrentWorkspaceAnswerResponse(
@@ -649,7 +819,7 @@ function createClarificationResponse(
 		redaction: { status: "not_needed" },
 		retention: defaultEventRetention(createdAt),
 	});
-	return { requestId: request.requestId, createdAt, ok: true, displayText: `${route.prompt}${candidateText}`, proposedActions: [], events: [event], errors: route.code === "unsupported_action" ? [{ code: "unsupported_action", message: route.prompt, retryable: false }] : undefined };
+	return { requestId: request.requestId, createdAt, ok: true, displayText: `${route.prompt}${candidateText}`, proposedActions: [], events: [event], errors: [{ code: route.code, message: route.prompt, retryable: route.code !== "unsupported_action" }] };
 }
 
 function pushWorldObservedEvent(
@@ -1696,6 +1866,75 @@ function invalidRequestResponse(requestId: string, createdAt: IsoTimestamp, mess
 	};
 }
 
+function handlePreWorldMute(
+	route: { kind: "mute"; durationMs: number } | { kind: "unmute" } | { kind: "mute_status" },
+	request: AlfredHandleRequest,
+	source: AlfredSource,
+	state: DaemonState,
+	now: () => Date,
+): AlfredHandleResponse {
+	const createdAt = now().toISOString();
+	if (route.kind === "unmute") {
+		const wasMuted = state.mutedUntil !== null;
+		state.mutedUntil = null;
+		return {
+			requestId: request.requestId,
+			createdAt,
+			ok: true,
+			displayText: wasMuted ? "Unmuted. Alfred will speak again." : "Alfred was not muted.",
+			proposedActions: [],
+			events: [],
+		};
+	}
+	if (route.kind === "mute_status") {
+		if (state.mutedUntil && state.mutedUntil <= createdAt) {
+			state.mutedUntil = null;
+		}
+		if (!state.mutedUntil) {
+			return {
+				requestId: request.requestId,
+				createdAt,
+				ok: true,
+				displayText: "Alfred is not muted.",
+				proposedActions: [],
+				events: [],
+			};
+		}
+		const remainingMs = Math.max(0, new Date(state.mutedUntil).getTime() - now().getTime());
+		const remainingMin = Math.ceil(remainingMs / 60000);
+		return {
+			requestId: request.requestId,
+			createdAt,
+			ok: true,
+			displayText: `Alfred is muted for another ${remainingMin} minute${remainingMin === 1 ? "" : "s"}.`,
+			proposedActions: [],
+			events: [],
+		};
+	}
+	// mute
+	if (route.durationMs <= 0 || route.durationMs > 24 * 3600 * 1000) {
+		return {
+			requestId: request.requestId,
+			createdAt,
+			ok: false,
+			displayText: "Mute duration must be between 1 second and 24 hours.",
+			proposedActions: [],
+			events: [],
+			errors: [{ code: "invalid_request", message: "Invalid mute duration.", retryable: false }],
+		};
+	}
+	state.mutedUntil = new Date(now().getTime() + route.durationMs).toISOString();
+	const durationMin = Math.round(route.durationMs / 60000);
+	return {
+		requestId: request.requestId,
+		createdAt,
+		ok: true,
+		displayText: `Muted for ${durationMin} minute${durationMin === 1 ? "" : "s"}.`,
+		proposedActions: [],
+		events: [],
+	};
+}
+
 function capabilityDeniedResponse(requestId: string, createdAt: IsoTimestamp, message: string): AlfredHandleResponse {
 	return {
 		requestId,
@@ -1802,6 +2041,12 @@ function writeHtml(response: ServerResponse, html: string): void {
 	response.end(html);
 }
 
+function stripSpeechIfMuted(response: AlfredHandleResponse, state: DaemonState): AlfredHandleResponse {
+	if (!state.mutedUntil) return response;
+	const { speech, ...rest } = response as AlfredHandleResponse & { speech?: unknown };
+	return rest as AlfredHandleResponse;
+}
+
 
 function snapshotState(state: DaemonState, loopManager?: AlfredLoopManager, nowIso: IsoTimestamp = new Date().toISOString()): AlfredDaemonStateSnapshot {
 	return {
@@ -1813,6 +2058,7 @@ function snapshotState(state: DaemonState, loopManager?: AlfredLoopManager, nowI
 		targetAliases: state.targetAliases,
 		events: state.events,
 		storageWarnings: state.storageWarnings.length > 0 ? state.storageWarnings : undefined,
+		mutedUntil: state.mutedUntil ?? undefined,
 	};
 }
 

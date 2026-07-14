@@ -757,16 +757,37 @@ test("validateInput for cmux.readNotifications accepts optional unread/count inp
 	assert.deepEqual(action?.buildPreview({ filter: "unread", countOnly: true }), { type: "cmux.readNotifications", filter: "unread", countOnly: true });
 });
 
-test("validateInput for cmux.openMarkdown requires path", () => {
+test("validateInput hardens safe open actions", () => {
 	const registry = createRegistry();
-	const action = registry.get("cmux.openMarkdown");
-	assert.ok(action);
+	const markdown = registry.get("cmux.openMarkdown");
+	const file = registry.get("cmux.openFile");
+	const url = registry.get("cmux.openUrl");
+	const browser = registry.get("cmux.openBrowserSurface");
+	assert.ok(markdown);
+	assert.ok(file);
+	assert.ok(url);
+	assert.ok(browser);
 
-	const errors = action?.validateInput({});
-	assert.notEqual(errors, null);
+	assert.notEqual(markdown?.validateInput({}), null);
+	assert.equal(markdown?.validateInput({ path: "docs/test.md" }), null);
+	for (const path of ["/tmp/test.md", "../secret.md", "~/secret.md", "-bad.md", "docs/-secret.md", "docs/plain.txt"]) {
+		assert.notEqual(markdown?.validateInput({ path }), null, path);
+	}
 
-	const valid = action?.validateInput({ path: "/tmp/test.md" });
-	assert.equal(valid, null);
+	assert.equal(file?.validateInput({ path: "package.json" }), null);
+	assert.equal(file?.validateInput({ path: "src/router/index.ts" }), null);
+	for (const path of ["/etc/passwd", "../secret", "~/secret", "-bad", "src/-flag.ts", "https://example.test/file", ""]) {
+		assert.notEqual(file?.validateInput({ path }), null, path);
+	}
+
+	assert.equal(url?.validateInput({ url: "https://example.test/docs" }), null);
+	for (const unsafeUrl of ["", "ftp://example.test", "file:///etc/passwd", "not a url"]) {
+		assert.notEqual(url?.validateInput({ url: unsafeUrl }), null, unsafeUrl);
+	}
+
+	assert.equal(browser?.validateInput({}), null);
+	assert.equal(browser?.validateInput({ url: "http://example.test" }), null);
+	assert.notEqual(browser?.validateInput({ url: "file:///etc/passwd" }), null);
 });
 
 test("validateInput for browser.click requires selector (but handler stubs)", () => {

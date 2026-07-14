@@ -1,0 +1,144 @@
+import { useMemo, useState, type FormEvent, type KeyboardEvent } from "react";
+import type { DashboardState, MemoryProvenance, ProfileFact } from "../api/types";
+
+type MemoryTab = "profile" | "session" | "knowledge";
+
+const MEMORY_TAB_KEY = "alfred2-memory-tab";
+const TABS: MemoryTab[] = ["profile", "session", "knowledge"];
+
+function savedTab(): MemoryTab {
+  const value = localStorage.getItem(MEMORY_TAB_KEY);
+  return TABS.includes(value as MemoryTab) ? value as MemoryTab : "profile";
+}
+
+function provenanceLabel(provenance: MemoryProvenance): string {
+  const source = provenance.source === "manual" ? "Manual" : provenance.source[0]!.toUpperCase() + provenance.source.slice(1);
+  return provenance.sourceId ? `${source} · ${provenance.sourceId}` : source;
+}
+
+export function MemoryPage({ state, onAdd, onDelete }: {
+  state: DashboardState;
+  onAdd: (fact: Pick<ProfileFact, "key" | "value" | "category">) => Promise<boolean>;
+  onDelete: (id: string) => Promise<void>;
+}) {
+  const [activeTab, setActiveTab] = useState<MemoryTab>(savedTab);
+  const [filter, setFilter] = useState("");
+  const [key, setKey] = useState("");
+  const [value, setValue] = useState("");
+  const [category, setCategory] = useState<ProfileFact["category"]>("preference");
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const profile = state.memory.profile;
+  const session = state.memory.session;
+  const knowledge = state.memory.knowledge;
+  const facts = useMemo(() => {
+    const query = filter.trim().toLowerCase();
+    return !query ? profile.records : profile.records.filter((fact) => `${fact.key} ${fact.value} ${fact.category} ${fact.provenance.source}`.toLowerCase().includes(query));
+  }, [filter, profile.records]);
+
+  function selectTab(tab: MemoryTab, focus = false) {
+    setActiveTab(tab);
+    localStorage.setItem(MEMORY_TAB_KEY, tab);
+    if (focus) window.requestAnimationFrame(() => document.getElementById(`memory-tab-${tab}`)?.focus());
+  }
+
+  function handleTabKey(event: KeyboardEvent<HTMLButtonElement>) {
+    const current = TABS.indexOf(activeTab);
+    let next = current;
+    if (event.key === "ArrowRight") next = (current + 1) % TABS.length;
+    else if (event.key === "ArrowLeft") next = (current - 1 + TABS.length) % TABS.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = TABS.length - 1;
+    else return;
+    event.preventDefault();
+    selectTab(TABS[next]!, true);
+  }
+
+  async function deleteFact(id: string) {
+    setDeletingId(id);
+    try {
+      await onDelete(id);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!key.trim() || !value.trim()) return;
+    setSaving(true);
+    try {
+      const saved = await onAdd({ key: key.trim(), value: value.trim(), category });
+      if (saved) {
+        setKey("");
+        setValue("");
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="page-stack">
+      <div aria-label="Memory categories" className="memory-tabs" role="tablist">
+        {TABS.map((tab) => {
+          const count = tab === "profile" ? profile.count : tab === "session" ? session.count : knowledge.count;
+          return (
+            <button
+              aria-controls={`memory-panel-${tab}`}
+              aria-selected={activeTab === tab}
+              className="memory-tab"
+              id={`memory-tab-${tab}`}
+              key={tab}
+              onClick={() => selectTab(tab)}
+              onKeyDown={handleTabKey}
+              role="tab"
+              tabIndex={activeTab === tab ? 0 : -1}
+              type="button"
+            >
+              <span>{tab[0]!.toUpperCase() + tab.slice(1)}</span><small>{count}</small>
+            </button>
+          );
+        })}
+      </div>
+
+      <div aria-labelledby="memory-tab-profile" className="page-stack memory-tabpanel" hidden={activeTab !== "profile"} id="memory-panel-profile" role="tabpanel" tabIndex={activeTab === "profile" ? 0 : -1}>
+          <section className="panel section-panel">
+            <div className="section-heading"><div><span className="eyebrow">Profile memory</span><h2>Facts Alfred keeps</h2></div><span className="count-badge">{profile.count}</span></div>
+            <form className="fact-form" onSubmit={submit}>
+              <label>Key<input required value={key} onChange={(event) => setKey(event.target.value)} placeholder="response_style" /></label>
+              <label className="fact-form__value">Value<input required value={value} onChange={(event) => setValue(event.target.value)} placeholder="Concise and direct" /></label>
+              <label>Category<select value={category} onChange={(event) => setCategory(event.target.value as ProfileFact["category"])}><option value="preference">Preference</option><option value="identity">Identity</option><option value="context">Context</option><option value="note">Note</option></select></label>
+              <button className="button button--primary" disabled={saving} type="submit">{saving ? "Saving…" : "Remember"}</button>
+            </form>
+          </section>
+          <section className="panel section-panel">
+            <div className="filter-row"><input aria-label="Filter profile facts" onChange={(event) => setFilter(event.target.value)} placeholder="Filter facts" value={filter} /><span>{facts.length} shown</span></div>
+            <div className="table-wrap"><table><thead><tr><th>Key</th><th>Value</th><th>Category</th><th>Provenance</th><th>Updated</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
+              {facts.length === 0 ? <tr><td className="empty-state" colSpan={6}>No matching facts.</td></tr> : facts.map((fact) => <tr key={fact.id}><td><strong>{fact.key}</strong></td><td>{fact.value}</td><td><span className="tag">{fact.category}</span></td><td><span title={fact.provenance.timestamp}>{provenanceLabel(fact.provenance)}</span></td><td>{new Date(fact.updatedAt).toLocaleString()}</td><td><button className="button button--danger" disabled={deletingId === fact.id} onClick={() => { if (window.confirm(`Delete fact ${fact.key}?`)) void deleteFact(fact.id); }} type="button">{deletingId === fact.id ? "Deleting…" : "Delete"}</button></td></tr>)}
+            </tbody></table></div>
+          </section>
+      </div>
+
+      <div aria-labelledby="memory-tab-session" className="page-stack memory-tabpanel" hidden={activeTab !== "session"} id="memory-panel-session" role="tabpanel" tabIndex={activeTab === "session" ? 0 : -1}>
+          <section className="panel section-panel">
+            <div className="section-heading"><div><span className="eyebrow">Working memory</span><h2>Current session</h2></div><span className="count-badge">{session.count}</span></div>
+            <p className="memory-boundary-note"><strong>Ephemeral.</strong> These sanitized summaries exist only for this Alfred process and are not written to profile or knowledge storage. Alfred's separate activity history may retain request and response metadata.</p>
+            <dl className="definition-list"><div><dt>Context</dt><dd>{session.currentContextTokens.toLocaleString()} tokens</dd></div><div><dt>Usage</dt><dd>{session.cumulativeTotalTokens.toLocaleString()} cumulative tokens</dd></div></dl>
+          </section>
+          <section className="panel section-panel">
+            <div className="table-wrap"><table><thead><tr><th>Request</th><th>Response</th><th>Tools</th><th>Outcome</th><th>When</th></tr></thead><tbody>
+              {session.records.length === 0 ? <tr><td className="empty-state" colSpan={5}>No working-memory turns in this process yet.</td></tr> : session.records.slice().reverse().map((turn) => <tr key={turn.id}><td>{turn.userText}</td><td>{turn.finalSpeech}</td><td>{turn.toolsUsed.length ? turn.toolsUsed.join(", ") : "—"}</td><td>{turn.shortOutcome || "—"}</td><td>{new Date(turn.updatedAt).toLocaleString()}</td></tr>)}
+            </tbody></table></div>
+          </section>
+      </div>
+
+      <div aria-labelledby="memory-tab-knowledge" className="page-stack memory-tabpanel" hidden={activeTab !== "knowledge"} id="memory-panel-knowledge" role="tabpanel" tabIndex={activeTab === "knowledge" ? 0 : -1}>
+          <section className="panel section-panel">
+            <div className="section-heading"><div><span className="eyebrow">Knowledge sources</span><h2>Imported material</h2></div><span className="count-badge">{knowledge.count}</span></div>
+            {knowledge.sources.length === 0 ? <div className="empty-state"><p>No knowledge sources yet.</p><p>Document ingestion, chunking, embeddings, retrieval, and citations arrive in Phase 5. This tab defines their home without creating storage early.</p></div> : <div className="tool-grid">{knowledge.sources.map((source) => <article className="tool-card" key={source.id}><header><h3>{source.title}</h3><span className="tag">{source.status}</span></header><p>{source.sourceType}{source.location ? ` · ${source.location}` : ""}</p></article>)}</div>}
+          </section>
+      </div>
+    </div>
+  );
+}

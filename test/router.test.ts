@@ -22,17 +22,37 @@ test("router handles confirm and cancel before world lookup", () => {
 	assert.deepEqual(routeAskBeforeWorld("what targets are active"), { kind: "needs_world" });
 });
 
+test("router handles mute, unmute, and mute status before world lookup", () => {
+	assert.deepEqual(routeAskBeforeWorld("unmute"), { kind: "unmute" });
+	assert.deepEqual(routeAskBeforeWorld("unmute alfred"), { kind: "unmute" });
+	assert.deepEqual(routeAskBeforeWorld("are you muted"), { kind: "mute_status" });
+	assert.deepEqual(routeAskBeforeWorld("mute status"), { kind: "mute_status" });
+	const muteRoute = routeAskBeforeWorld("mute for 30 minutes");
+	assert.equal(muteRoute.kind, "mute");
+	if (muteRoute.kind === "mute") {
+		assert.equal(muteRoute.durationMs, 30 * 60 * 1000);
+	}
+	assert.deepEqual(routeAskBeforeWorld("silence for 1 hour"), { kind: "mute", durationMs: 3600 * 1000 });
+	assert.deepEqual(routeAskBeforeWorld("shut up for 5 minutes"), { kind: "mute", durationMs: 5 * 60 * 1000 });
+	assert.deepEqual(routeAskBeforeWorld("be quiet for 90 seconds"), { kind: "mute", durationMs: 90 * 1000 });
+	assert.deepEqual(routeAskBeforeWorld("what targets"), { kind: "needs_world" }); // not mute
+});
+
 test("router classifies safe answer and direct action intents", () => {
 	const targets = [target()];
 	assert.deepEqual(routeAskWithWorld({ inputText: "what targets are active", targets }), { kind: "list_targets" });
+	assert.deepEqual(routeAskWithWorld({ inputText: "what are active tabs", targets }), { kind: "list_active_tabs" });
 	assert.deepEqual(routeAskWithWorld({ inputText: "what is current workspace", targets }), { kind: "current_workspace" });
 	assert.deepEqual(routeAskWithWorld({ inputText: "what pending actions exist", targets }), { kind: "pending_actions" });
 	assert.deepEqual(routeAskWithWorld({ inputText: "open diff", targets }), { kind: "safe_action", actionId: "cmux.openDiff", input: { unstaged: true } });
 	assert.deepEqual(routeAskWithWorld({ inputText: "read notifications", targets }), { kind: "safe_action", actionId: "cmux.readNotifications", input: {} });
 	assert.deepEqual(routeAskWithWorld({ inputText: "open URL https://example.test/docs", targets }), { kind: "safe_action", actionId: "cmux.openUrl", input: { url: "https://example.test/docs" } });
+	assert.deepEqual(routeAskWithWorld({ inputText: "open file src/router/index.ts", targets }), { kind: "safe_action", actionId: "cmux.openFile", input: { path: "src/router/index.ts" } });
+	assert.deepEqual(routeAskWithWorld({ inputText: "show file package.json", targets }), { kind: "safe_action", actionId: "cmux.openFile", input: { path: "package.json" } });
+	assert.deepEqual(routeAskWithWorld({ inputText: "open src/daemon/index.ts", targets }), { kind: "safe_action", actionId: "cmux.openFile", input: { path: "src/daemon/index.ts" } });
 });
 
-test("router enforces safe relative markdown paths", () => {
+test("router enforces safe relative file and markdown paths", () => {
 	assert.equal(isSafeRelativeMarkdownPath("docs/plans/PLAN.md"), true);
 	assert.equal(isSafeRelativeMarkdownPath("notes/README.markdown"), true);
 	for (const path of [
@@ -51,6 +71,12 @@ test("router enforces safe relative markdown paths", () => {
 		assert.equal(route.kind === "clarification" ? route.code : undefined, "unsupported_action");
 	}
 	assert.deepEqual(routeAskWithWorld({ inputText: "open markdown docs/plans/PLAN.md", targets: [target()] }), { kind: "safe_action", actionId: "cmux.openMarkdown", input: { path: "docs/plans/PLAN.md" } });
+	for (const path of ["/etc/passwd", "../secret", "~/secret", "-bad", "docs/../secret", "src/-flag.ts", "C:\\Users\\secret.txt", "\\\\server\\share\\secret.txt", "https://example.test/file"]) {
+		const route = routeAskWithWorld({ inputText: `open file ${path}`, targets: [target()] });
+		assert.equal(route.kind, "clarification", path);
+		assert.equal(route.kind === "clarification" ? route.code : undefined, "unsupported_action", path);
+	}
+	assert.deepEqual(routeAskWithWorld({ inputText: "open file package.json", targets: [target()] }), { kind: "safe_action", actionId: "cmux.openFile", input: { path: "package.json" } });
 });
 
 test("router resolves send-key and draft intents without guessing ambiguous targets", () => {
@@ -81,6 +107,17 @@ test("planner draft resolution rejects mismatched target ref and name", () => {
 	const resolved = resolvePlannerDraftIntent({ kind: "draft_message", targetRef: "surface:a", targetName: "Docs Bot", message: "hello" }, targets);
 	assert.equal(resolved.ok, false);
 	assert.equal(resolved.error?.code, "target_ambiguous");
+});
+
+test("planner target hint can resolve a tab by workspace label without choosing the workspace", () => {
+	const targets = [
+		{ ...target({ kind: "cmux-workspace", ref: "workspace:powerco", label: "Powerco", surfaceRef: undefined, workspaceRef: undefined, capabilities: ["workspace.send"] }) },
+		target({ ref: "surface:powerco", surfaceRef: "surface:powerco", label: "π - Power Code", workspaceRef: "workspace:powerco", workspaceLabel: "Powerco" }),
+	];
+	const resolved = resolvePlannerDraftIntent({ kind: "draft_message_to_target", targetPhrase: "Powerco", targetKindHint: "tab", message: "hello" }, targets);
+
+	assert.equal(resolved.ok, true);
+	assert.equal(resolved.intent?.target.ref, "surface:powerco");
 });
 
 test("router resolves aliases and detects stale aliases", () => {

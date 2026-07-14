@@ -22,25 +22,30 @@ Let Alfred resolve human names like "backend", "main Pi", and "review lane" to c
 
 ## Checklist
 
-- [ ] Define target memory records with alias, scope (`workspace` or `global`), cmux ref, target type, title snapshot, last seen time, and source.
-- [ ] Implement commands/API operations to remember, list, inspect, and forget aliases.
-- [ ] Add resolver logic in this order: explicit ref, workspace-local alias, global alias, exact cmux title, recent target in current workspace, clarification.
-- [ ] Add ambiguity responses when multiple targets match a natural name.
-- [ ] Persist target memory using the existing local persistence rules and redaction constraints.
-- [ ] Surface resolved target previews in pending action proposals.
+- [x] Define target memory records with alias, scope (`workspace` or `global`), cmux ref, target type, title snapshot, last seen time, and source.
+- [x] Implement commands/API operations to remember, list, and forget aliases.
+- [ ] Implement an `inspect alias <name>` UX/API operation. Deferred to alias UX follow-up.
+- [x] Add resolver logic in this order: explicit ref, workspace-local alias, global alias, exact cmux title, recent target in current workspace, clarification.
+- [x] Add ambiguity responses when multiple targets match a natural name.
+- [x] Persist target memory using the existing local persistence rules and redaction constraints.
+- [x] Surface resolved target previews in pending action proposals.
 
 ## Tests
 
-- [ ] Run `npm run typecheck` and verify target resolver types compile.
-- [ ] Run `npm test` and verify alias, title, direct-ref, stale-ref, and ambiguous-match cases.
-- [ ] Run `npm run check` and verify the full project gate passes.
-- [ ] Manual QA inside cmux: remember the current surface as a test alias, resolve it, then forget it.
+- [x] Run `npm run typecheck` and verify target resolver types compile.
+- [x] Run `npm test` and verify alias, title, direct-ref, stale-ref, and ambiguous-match cases.
+- [x] Run `npm run check` and verify the full project gate passes.
+- [x] Manual QA inside cmux: remember the current surface as a test alias, resolve it, then forget it.
 
 ## Completion Criteria
 
-- [ ] Alfred can resolve remembered aliases to concrete cmux refs.
-- [ ] Ambiguous target requests ask for clarification instead of taking action.
-- [ ] Target memory survives daemon restart without storing sensitive terminal content.
+- [x] Alfred can resolve remembered aliases to concrete cmux refs.
+- [x] Ambiguous target requests ask for clarification instead of taking action.
+- [x] Target memory survives daemon restart without storing sensitive terminal content.
+
+## Status
+
+Implemented in the Task 003 pass. Alias inspect and richer list/filter UX remain deferred follow-ups.
 
 ## Notes
 

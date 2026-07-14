@@ -1,4 +1,7 @@
 import type { AlfredCapability, AlfredError, AlfredRef, AlfredTarget, AlfredTargetAlias, AlfredTargetAliasScope } from "../contracts/runtime.ts";
+import type { AlfredTargetKindHint } from "../planner/index.ts";
+import { isSafeRelativeMarkdownPath, isSafeRelativePath, normalizeHttpUrl } from "../validation/open.ts";
+export { isSafeRelativeMarkdownPath } from "../validation/open.ts";
 
 export interface DraftIntent {
 	target: AlfredTarget;
@@ -13,27 +16,34 @@ export interface KeyIntent {
 }
 
 export interface PlannerDraftMessageIntent {
-	kind: "draft_message";
+	kind: "draft_message" | "draft_message_to_target";
 	message: string;
 	targetRef?: AlfredRef;
 	targetName?: string;
+	targetPhrase?: string;
+	targetKindHint?: AlfredTargetKindHint;
 }
 
 export interface PlannerDraftResolution {
 	ok: boolean;
 	intent?: DraftIntent;
 	error?: AlfredError;
+	candidates?: AlfredTarget[];
 }
 
-export type SafeAskActionId = "cmux.openDiff" | "cmux.openMarkdown" | "cmux.openUrl" | "cmux.openBrowserSurface" | "cmux.readNotifications";
+export type SafeAskActionId = "cmux.openDiff" | "cmux.openMarkdown" | "cmux.openFile" | "cmux.openUrl" | "cmux.openBrowserSurface" | "cmux.readNotifications";
 
 export type AlfredPreWorldRoute =
 	| { kind: "confirm" }
 	| { kind: "cancel" }
+	| { kind: "mute"; durationMs: number }
+	| { kind: "unmute" }
+	| { kind: "mute_status" }
 	| { kind: "needs_world" };
 
 export type AlfredDeterministicRoute =
 	| { kind: "list_targets" }
+	| { kind: "list_active_tabs" }
 	| { kind: "current_workspace" }
 	| { kind: "pending_actions" }
 	| { kind: "list_aliases" }
@@ -43,6 +53,9 @@ export type AlfredDeterministicRoute =
 	| { kind: "safe_action"; actionId: SafeAskActionId; input: Record<string, unknown> }
 	| { kind: "send_key"; intent: KeyIntent }
 	| { kind: "draft_message"; intent: DraftIntent }
+	| { kind: "mute"; durationMs: number }
+	| { kind: "unmute" }
+	| { kind: "mute_status" }
 	| { kind: "no_match" };
 
 export interface RouteAskInput {
@@ -67,6 +80,10 @@ interface ResolveOptions {
 export function routeAskBeforeWorld(inputText: string): AlfredPreWorldRoute {
 	if (isConfirmInput(inputText)) return { kind: "confirm" };
 	if (isCancelInput(inputText)) return { kind: "cancel" };
+	if (isUnmuteInput(inputText)) return { kind: "unmute" };
+	if (isMuteStatusInput(inputText)) return { kind: "mute_status" };
+	const muteDuration = parseMuteInput(inputText);
+	if (muteDuration !== null) return { kind: "mute", durationMs: muteDuration };
 	return { kind: "needs_world" };
 }
 
@@ -74,6 +91,7 @@ export function routeAskWithWorld(input: RouteAskInput): AlfredDeterministicRout
 	const inputText = input.inputText;
 	const targets = [...input.targets];
 	const options: ResolveOptions = { currentWorkspaceRef: input.currentWorkspaceRef, aliases: input.aliases, recentTargets: input.recentTargets };
+	if (isActiveTabsInput(inputText)) return { kind: "list_active_tabs" };
 	if (isTargetListInput(inputText)) return { kind: "list_targets" };
 	if (isCurrentWorkspaceInput(inputText)) return { kind: "current_workspace" };
 	if (isPendingActionsInput(inputText)) return { kind: "pending_actions" };
@@ -87,6 +105,8 @@ export function routeAskWithWorld(input: RouteAskInput): AlfredDeterministicRout
 	if (browserInput) return { kind: "safe_action", actionId: "cmux.openBrowserSurface", input: browserInput };
 	const markdownPath = parseOpenMarkdownInput(inputText);
 	if (markdownPath) return { kind: "safe_action", actionId: "cmux.openMarkdown", input: { path: markdownPath } };
+	const filePath = parseOpenFileInput(inputText);
+	if (filePath) return { kind: "safe_action", actionId: "cmux.openFile", input: { path: filePath } };
 	const urlToOpen = parseOpenUrlInput(inputText);
 	if (urlToOpen) return { kind: "safe_action", actionId: "cmux.openUrl", input: { url: urlToOpen } };
 	const unreadNotifications = parseUnreadNotificationsInput(inputText);
@@ -105,13 +125,15 @@ export function routeAskWithWorld(input: RouteAskInput): AlfredDeterministicRout
 }
 
 export function resolvePlannerDraftIntent(intent: PlannerDraftMessageIntent, targets: AlfredTarget[], currentWorkspaceRef?: AlfredRef, aliases: readonly AlfredTargetAlias[] = [], recentTargets: readonly AlfredTarget[] = []): PlannerDraftResolution {
+	const searchTargets = filterTargetsByHint(targets, intent.targetKindHint);
 	if (intent.targetRef) {
-		const refMatches = targetRefMatches(targets, intent.targetRef);
+		const refMatches = targetRefMatches(searchTargets, intent.targetRef);
 		if (refMatches.length !== 1) {
-			return { ok: false, error: { code: refMatches.length > 1 ? "target_ambiguous" : "target_not_found", message: refMatches.length > 1 ? "Planner targetRef matched multiple visible targets." : "Planner targetRef did not match a visible target.", retryable: false } };
+			return { ok: false, error: { code: refMatches.length > 1 ? "target_ambiguous" : "target_not_found", message: refMatches.length > 1 ? "Planner targetRef matched multiple visible targets." : "Planner targetRef did not match a visible target.", retryable: false }, candidates: refMatches.length > 1 ? refMatches : undefined };
 		}
-		if (intent.targetName) {
-			const named = resolveTargetPhrase(intent.targetName, targets, { currentWorkspaceRef, aliases, recentTargets });
+		const namedPhrase = intent.targetPhrase ?? intent.targetName;
+		if (namedPhrase) {
+			const named = resolvePlannerTargetPhrase(namedPhrase, searchTargets, intent.targetKindHint, { currentWorkspaceRef, aliases, recentTargets });
 			if (named.kind === "resolved" && !sameTarget(named.target, refMatches[0]!)) {
 				return { ok: false, error: { code: "target_ambiguous", message: "Planner targetRef and targetName identified different visible targets.", retryable: false } };
 			}
@@ -119,16 +141,36 @@ export function resolvePlannerDraftIntent(intent: PlannerDraftMessageIntent, tar
 		const target = refMatches[0]!;
 		return { ok: true, intent: { target, message: intent.message, confidence: target.confidence ?? "exact" } };
 	}
-	if (intent.targetName) {
-		const resolved = resolveTargetPhrase(intent.targetName, targets, { currentWorkspaceRef, aliases, recentTargets });
+	const targetPhrase = intent.targetPhrase ?? intent.targetName;
+	if (targetPhrase) {
+		const resolved = resolvePlannerTargetPhrase(targetPhrase, searchTargets, intent.targetKindHint, { currentWorkspaceRef, aliases, recentTargets });
 		if (resolved.kind === "resolved") return { ok: true, intent: { target: resolved.target, message: intent.message, confidence: resolved.confidence } };
-		return { ok: false, error: { code: resolved.kind === "ambiguous" ? "target_ambiguous" : "target_not_found", message: resolved.kind === "ambiguous" ? "Planner targetName matched multiple visible targets." : "Planner targetName did not match a visible target.", retryable: false } };
+		return { ok: false, error: { code: resolved.kind === "ambiguous" ? "target_ambiguous" : "target_not_found", message: resolved.kind === "ambiguous" ? "Planner target phrase matched multiple visible targets." : "Planner target phrase did not match a visible target.", retryable: false }, candidates: resolved.kind === "ambiguous" ? resolved.candidates : undefined };
 	}
 	return { ok: false, error: { code: "target_not_found", message: "Planner draft target could not be resolved.", retryable: false } };
 }
 
 function targetRefMatches(targets: AlfredTarget[], targetRef: AlfredRef): AlfredTarget[] {
 	return targets.filter((target) => requiredSendCapabilities(target).length > 0 && (target.ref === targetRef || target.surfaceRef === targetRef || target.workspaceRef === targetRef));
+}
+
+function filterTargetsByHint(targets: AlfredTarget[], hint?: AlfredTargetKindHint): AlfredTarget[] {
+	if (!hint) return targets;
+	if (hint === "workspace") return targets.filter((target) => target.kind === "cmux-workspace");
+	return targets.filter((target) => target.kind !== "cmux-workspace");
+}
+
+function resolvePlannerTargetPhrase(targetPhrase: string, targets: AlfredTarget[], hint: AlfredTargetKindHint | undefined, options: ResolveOptions): TargetResolution {
+	const resolved = resolveTargetPhrase(targetPhrase, targets, options);
+	if (resolved.kind !== "not_found" || !hint || hint === "workspace") return resolved;
+	const normalizedQuery = normalizeForMatch(targetPhrase);
+	const workspaceLabelMatches = targets
+		.filter((target) => requiredSendCapabilities(target).length > 0 && normalizeForMatch(target.workspaceLabel ?? "") === normalizedQuery)
+		.map((target) => withConfidence(target, "inferred"));
+	const unique = uniqueTargets(workspaceLabelMatches);
+	if (unique.length === 1) return { kind: "resolved", target: unique[0]!, confidence: "inferred" };
+	if (unique.length > 1) return { kind: "ambiguous", candidates: unique };
+	return resolved;
 }
 
 function sameTarget(left: AlfredTarget, right: AlfredTarget): boolean {
@@ -302,8 +344,17 @@ export function normalizeForMatch(value: string): string {
 }
 
 export function isTargetListInput(inputText: string): boolean {
-	return /^(?:what\s+)?(?:targets|surfaces|workspaces)(?:\s+are\s+(?:active|visible|available))?\??$/i.test(inputText.trim())
-		|| /^(?:what|which)\s+(?:targets|surfaces|workspaces)\s+(?:are\s+)?(?:active|visible|available)\??$/i.test(inputText.trim());
+	const trimmed = inputText.trim();
+	return /^(?:what\s+)?(?:targets|surfaces|workspaces)(?:\s+are\s+(?:active|visible|available))?\??$/i.test(trimmed)
+		|| /^(?:what|which)\s+(?:targets|surfaces|workspaces)\s+(?:are\s+)?(?:active|visible|available)\??$/i.test(trimmed)
+		|| /^(?:what|which)\s+(?:are\s+)?(?:the\s+)?(?:active|visible|available|recent)\s+(?:targets|surfaces|workspaces)\??$/i.test(trimmed);
+}
+
+export function isActiveTabsInput(inputText: string): boolean {
+	const trimmed = inputText.trim();
+	return /^(?:what|which)\s+(?:are\s+)?(?:the\s+)?(?:active|recent|most\s+active)\s+(?:tabs|sessions)\??$/i.test(trimmed)
+		|| /^(?:what|which)\s+(?:tabs|sessions)\s+(?:are\s+)?(?:active|visible|available|recent)\??$/i.test(trimmed)
+		|| /^(?:list|show)\s+(?:the\s+)?(?:(?:active|recent|most\s+active)\s+)?(?:tabs|sessions)\??$/i.test(trimmed);
 }
 
 export function isCurrentWorkspaceInput(inputText: string): boolean {
@@ -357,12 +408,8 @@ function parseOpenBrowserInput(inputText: string): Record<string, unknown> | nul
 	const rawUrl = match?.[1]?.trim();
 	if (!match) return null;
 	if (!rawUrl) return {};
-	try {
-		const url = new URL(rawUrl);
-		return url.protocol === "http:" || url.protocol === "https:" ? { url: url.href } : null;
-	} catch {
-		return null;
-	}
+	const url = normalizeHttpUrl(rawUrl);
+	return url ? { url } : null;
 }
 
 export function parseOpenMarkdownInput(inputText: string): string | null {
@@ -371,24 +418,16 @@ export function parseOpenMarkdownInput(inputText: string): string | null {
 	return path && isSafeRelativeMarkdownPath(path) ? path : null;
 }
 
-export function isSafeRelativeMarkdownPath(path: string): boolean {
-	if (!/\.(?:md|markdown)$/i.test(path)) return false;
-	if (path.startsWith("/") || path.startsWith("\\") || path.startsWith("~") || path.startsWith("-")) return false;
-	if (/^[a-z]:[\\/]/i.test(path)) return false;
-	const parts = path.split(/[\\/]+/).filter(Boolean);
-	return parts.length > 0 && parts.every((part) => part !== "." && part !== ".." && !part.startsWith("-"));
+export function parseOpenFileInput(inputText: string): string | null {
+	const match = inputText.trim().match(/^(?:(?:open|show)\s+file|open(?!\s+(?:url|browser|markdown|md|diff|changes)\b))\s+(.+)$/i);
+	const path = match?.[1]?.trim();
+	return path && isSafeRelativePath(path) ? path : null;
 }
 
 export function parseOpenUrlInput(inputText: string): string | null {
 	const match = inputText.trim().match(/^(?:open|show)\s+(?:url\s+)?(https?:\/\/\S+)$/i);
 	const rawUrl = match?.[1]?.trim();
-	if (!rawUrl) return null;
-	try {
-		const url = new URL(rawUrl);
-		return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
-	} catch {
-		return null;
-	}
+	return rawUrl ? normalizeHttpUrl(rawUrl) : null;
 }
 
 function parseUnreadNotificationsInput(inputText: string): Record<string, unknown> | null {
@@ -409,6 +448,30 @@ export function isConfirmInput(inputText: string): boolean {
 
 export function isCancelInput(inputText: string): boolean {
 	return /^(cancel|cancel that|never mind|nevermind|do not send|don't send)$/i.test(inputText.trim());
+}
+
+export function isUnmuteInput(inputText: string): boolean {
+	return /^(unmute|unmute alfred|unsilence|stop muting|stop silencing)$/i.test(inputText.trim());
+}
+
+export function isMuteStatusInput(inputText: string): boolean {
+	return /^(are you muted|mute status|muted\?|silence status|is alfred muted)/i.test(inputText.trim());
+}
+
+export function parseMuteInput(inputText: string): number | null {
+	const trimmed = inputText.trim();
+	const match = trimmed.match(/^(?:mute|silence|shut up|be quiet|quiet)(?:\s+(?:alfred|yourself))?(?:\s+for)?\s+(\d+)\s*(second|seconds|sec|s|minute|minutes|min|m|hour|hours|hr|h)s?$/i);
+	if (!match) return null;
+	const amount = Number(match[1]);
+	if (!Number.isFinite(amount) || amount <= 0) return null;
+	const unit = (match[2] ?? "").toLowerCase();
+	let ms: number;
+	if (unit.startsWith("s")) ms = amount * 1000;
+	else if (unit.startsWith("mi")) ms = amount * 60 * 1000;
+	else if (unit.startsWith("h")) ms = amount * 3600 * 1000;
+	else return null;
+	if (ms > 24 * 3600 * 1000) return null; // max 24 hours
+	return ms;
 }
 
 export function requiredSendCapabilities(target: AlfredTarget): AlfredCapability[] {

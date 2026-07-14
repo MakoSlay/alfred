@@ -8,7 +8,7 @@ import { createAlfredDaemon, defaultDaemonConfig } from "../src/daemon/index.ts"
 import { renderDashboardHtml } from "../src/dashboard/index.ts";
 import { cliSource, piCommandSource, powerCodeTarget } from "../src/testing/fixtures.ts";
 import type { AlfredDraft, AlfredHandleRequest, AlfredTarget } from "../src/contracts/runtime.ts";
-import type { AlfredPlanner, AlfredPlannerInput } from "../src/planner/index.ts";
+import type { AlfredPlanner, AlfredPlannerInput, AlfredPlannerIntent } from "../src/planner/index.ts";
 import type { AlfredLoopDecision, AlfredLoopRuntimeState, AlfredLoopScheduler } from "../src/loops/index.ts";
 import type { CmuxError } from "../src/cmux/index.ts";
 
@@ -27,6 +27,7 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 	const sentKeys: Array<{ surfaceRef: string; key: string }> = [];
 	const openedDiffs: Array<Record<string, unknown> | undefined> = [];
 	const openedMarkdown: Array<{ path: string; options?: Record<string, unknown> }> = [];
+	const openedFiles: Array<{ path: string; options?: Record<string, unknown> }> = [];
 	const openedUrls: Array<{ url: string; options?: Record<string, unknown> }> = [];
 	const openedBrowsers: Array<{ url?: string; options?: Record<string, unknown> }> = [];
 	const notifications = [{ id: "notif:1", title: "Build finished", isRead: false, createdAt: "2026-06-19T21:59:00.000Z" }];
@@ -35,6 +36,7 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 		sends,
 		openedDiffs,
 		openedMarkdown,
+		openedFiles,
 		openedUrls,
 		openedBrowsers,
 		notifications,
@@ -67,6 +69,10 @@ function createMockCmux(options: MockCmuxOptions = {}) {
 			},
 			async openMarkdown(path: string, options?: Record<string, unknown>) {
 				openedMarkdown.push({ path, options });
+				return { ok: true as const, value: { path, opened: true } };
+			},
+			async openFile(path: string, options?: Record<string, unknown>) {
+				openedFiles.push({ path, options });
 				return { ok: true as const, value: { path, opened: true } };
 			},
 			async openUrl(url: string, options?: Record<string, unknown>) {
@@ -232,8 +238,27 @@ test("POST /handle returns typed contract response and process-owned events", as
 	});
 });
 
-test("POST /ask answers target list questions without side effects", async () => {
+test("POST /ask answers target list questions with recent workspaces only", async () => {
 	await withDaemon(async (baseUrl, token, mock) => {
+		const workspace = (ref: string, label: string): AlfredTarget => powerCodeTarget({
+			kind: "cmux-workspace",
+			ref,
+			label,
+			workspaceRef: ref,
+			workspaceLabel: label,
+			surfaceRef: undefined,
+			capabilities: ["world.read", "workspace.send"],
+		});
+		mock.setTargets([
+			workspace("workspace:1", "Main"),
+			workspace("workspace:2", "Powerco"),
+			workspace("workspace:3", "Sandbox"),
+			workspace("workspace:4", "Docs"),
+			workspace("workspace:5", "API"),
+			workspace("workspace:6", "Mobile"),
+			workspace("workspace:7", "Overflow"),
+			powerCodeTarget({ label: "π - Power Code", workspaceRef: "workspace:2", workspaceLabel: "Powerco" }),
+		]);
 		const response = await postJson<{ ok: boolean; displayText: string; proposedActions: unknown[]; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
 			requestId: "req_ask_targets",
 			createdAt: "2026-06-19T21:59:59.000Z",
@@ -243,11 +268,61 @@ test("POST /ask answers target list questions without side effects", async () =>
 
 		assert.equal(response.status, 200);
 		assert.equal(response.body.ok, true);
-		assert.match(response.body.displayText, /Visible targets:/);
-		assert.match(response.body.displayText, /π - Power Code/);
+		assert.match(response.body.displayText, /Recent workspaces:/);
+		assert.match(response.body.displayText, /Powerco/);
+		assert.match(response.body.displayText, /Sandbox/);
+		assert.doesNotMatch(response.body.displayText, /workspace:\d+/);
+		assert.doesNotMatch(response.body.displayText, /π - Power Code/);
+		assert.doesNotMatch(response.body.displayText, /Overflow/);
+		assert.equal(response.body.displayText.split("\n").filter((line) => line.startsWith("- ")).length, 5);
 		assert.deepEqual(response.body.proposedActions, []);
 		assert.equal(response.body.events[0]?.kind, "world.observed");
 		assert.deepEqual(mock.sends, []);
+	});
+});
+
+test("POST /ask answers active tab questions scoped to current workspace", async () => {
+	await withDaemon(async (baseUrl, token, mock) => {
+		mock.setTargets([
+			powerCodeTarget({ ref: "surface:alpha", surfaceRef: "surface:alpha", label: "Alpha Tab", workspaceRef: "workspace:alpha", workspaceLabel: "Alpha" }),
+			powerCodeTarget({ ref: "surface:beta1", surfaceRef: "surface:beta1", label: "Beta Current", workspaceRef: "workspace:beta", workspaceLabel: "Beta", current: true }),
+			powerCodeTarget({ ref: "surface:beta2", surfaceRef: "surface:beta2", label: "Beta Two", workspaceRef: "workspace:beta", workspaceLabel: "Beta" }),
+			powerCodeTarget({ ref: "surface:beta3", surfaceRef: "surface:beta3", label: "Beta Three", workspaceRef: "workspace:beta", workspaceLabel: "Beta" }),
+			powerCodeTarget({ ref: "surface:beta4", surfaceRef: "surface:beta4", label: "Beta Four", workspaceRef: "workspace:beta", workspaceLabel: "Beta" }),
+		]);
+		const scoped = await postJson<{ ok: boolean; displayText: string; proposedActions: unknown[] }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_active_tabs",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "what are active tabs" },
+			context: { currentWorkspaceRef: "workspace:beta" },
+		});
+
+		assert.equal(scoped.status, 200);
+		assert.equal(scoped.body.ok, true);
+		assert.match(scoped.body.displayText, /Recent active tabs in Beta/);
+		assert.match(scoped.body.displayText, /Beta Current/);
+		assert.match(scoped.body.displayText, /Beta Two/);
+		assert.match(scoped.body.displayText, /Beta Three/);
+		assert.doesNotMatch(scoped.body.displayText, /Beta Four/);
+		assert.doesNotMatch(scoped.body.displayText, /Alpha Tab/);
+		assert.equal(scoped.body.displayText.split("\n").filter((line) => line.startsWith("- ")).length, 3);
+		assert.deepEqual(scoped.body.proposedActions, []);
+
+		mock.setTargets([
+			powerCodeTarget({ ref: "surface:alpha", surfaceRef: "surface:alpha", label: "Alpha Tab", workspaceRef: "workspace:alpha", workspaceLabel: "Alpha" }),
+			powerCodeTarget({ ref: "surface:beta1", surfaceRef: "surface:beta1", label: "Beta One", workspaceRef: "workspace:beta", workspaceLabel: "Beta" }),
+			powerCodeTarget({ ref: "surface:gamma", surfaceRef: "surface:gamma", label: "Gamma Tab", workspaceRef: "workspace:gamma", workspaceLabel: "Gamma" }),
+		]);
+		const global = await postJson<{ ok: boolean; displayText: string }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_active_tabs_global",
+			createdAt: "2026-06-19T22:00:00.000Z",
+			source: piCommandSource(),
+			input: { text: "which tabs are active" },
+		});
+		assert.equal(global.status, 200);
+		assert.match(global.body.displayText, /Recent active tabs across workspaces/);
+		assert.match(global.body.displayText, /Alpha Tab — Alpha/);
 	});
 });
 
@@ -329,6 +404,16 @@ test("POST /ask executes safe open and notification requests directly through th
 		assert.equal(markdown.body.ok, true);
 		assert.deepEqual(mock.openedMarkdown.map((entry) => entry.path), ["docs/plans/alfred-jarvis-roadmap/PLAN.md"]);
 
+		const file = await postJson<{ ok: boolean }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_open_file",
+			createdAt: "2026-06-19T22:00:00.500Z",
+			source: piCommandSource(),
+			input: { text: "open file package.json" },
+		});
+		assert.equal(file.status, 200);
+		assert.equal(file.body.ok, true);
+		assert.deepEqual(mock.openedFiles.map((entry) => entry.path), ["package.json"]);
+
 		const url = await postJson<{ ok: boolean }>(baseUrl, token, "/ask", {
 			requestId: "req_ask_open_url",
 			createdAt: "2026-06-19T22:00:01.000Z",
@@ -356,6 +441,16 @@ test("POST /ask executes safe open and notification requests directly through th
 		assert.equal(blockedUncMarkdown.status, 200);
 		assert.equal(blockedUncMarkdown.body.ok, true);
 		assert.deepEqual(mock.openedMarkdown.map((entry) => entry.path), ["docs/plans/alfred-jarvis-roadmap/PLAN.md"]);
+
+		const blockedFile = await postJson<{ ok: boolean }>(baseUrl, token, "/ask", {
+			requestId: "req_ask_open_file_blocked",
+			createdAt: "2026-06-19T22:00:02.750Z",
+			source: piCommandSource(),
+			input: { text: "open file ../secret" },
+		});
+		assert.equal(blockedFile.status, 200);
+		assert.equal(blockedFile.body.ok, true);
+		assert.deepEqual(mock.openedFiles.map((entry) => entry.path), ["package.json"]);
 
 		const notifications = await postJson<{ ok: boolean; displayText: string; events: Array<{ kind: string }> }>(baseUrl, token, "/ask", {
 			requestId: "req_ask_notifications",
@@ -747,6 +842,182 @@ test("planner draft_message by target name resolves safely", async () => {
 		assert.equal(response.body.pendingDraft?.target.label, "Codex Review");
 		assert.equal(response.body.pendingDraft?.status, "pending");
 		assert.deepEqual(mock.sends, []);
+	}, { planner });
+});
+
+test("planner draft_message_to_target handles flexible multi-step phrasing without sending", async () => {
+	let plannerWasCalled = false;
+	const planner: AlfredPlanner = {
+		async plan(input) {
+			plannerWasCalled = true;
+			assert.match(input.inputText, /main workspace/i);
+			return {
+				ok: true,
+				intent: { kind: "draft_message_to_target", targetPhrase: "Powerco", targetKindHint: "tab", message: "what are the redundant files" },
+				sanitizedInputSummary: { value: input.inputText, redaction: { status: "not_needed" } },
+			};
+		},
+	};
+	await withDaemon(async (baseUrl, token, mock) => {
+		mock.setTargets([
+			{ kind: "cmux-workspace", ref: "workspace:main", label: "Main", current: true, selected: true, capabilities: ["workspace.send"] },
+			powerCodeTarget({ ref: "surface:42", surfaceRef: "surface:42", label: "Powerco", workspaceRef: "workspace:main", workspaceLabel: "Main" }),
+		]);
+		const response = await postJson<{ ok: boolean; speech?: string; displayText: string; pendingAction?: { actionMetaId: string; status: string; target?: AlfredTarget }; pendingDraft?: AlfredDraft }>(baseUrl, token, "/ask", {
+			requestId: "req_planner_flexible_powerco",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "check in my main workspace and then look at the powerco tab and ask what are the redundant files" },
+			context: { currentWorkspaceRef: "workspace:main" },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.equal(plannerWasCalled, true);
+		assert.equal(response.body.pendingAction?.actionMetaId, "cmux.sendText");
+		assert.equal(response.body.pendingDraft?.target.label, "Powerco");
+		assert.equal(response.body.pendingDraft?.text.value, "what are the redundant files");
+		assert.match(response.body.speech ?? response.body.displayText, /Shall I send that to Powerco|Draft ready for Powerco/);
+		assert.deepEqual(mock.sends, []);
+	}, { planner });
+});
+
+test("deterministic Ask routes bypass the planner", async () => {
+	let calls = 0;
+	const planner: AlfredPlanner = {
+		async plan(input) {
+			calls += 1;
+			return { ok: true, intent: { kind: "open_file", path: "package.json" }, sanitizedInputSummary: { value: input.inputText, redaction: { status: "not_needed" } } };
+		},
+	};
+	await withDaemon(async (baseUrl, token, mock) => {
+		const response = await postJson<{ ok: boolean; displayText: string }>(baseUrl, token, "/ask", {
+			requestId: "req_deterministic_bypass_planner",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "what targets are active" },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.match(response.body.displayText, /Recent workspaces/);
+		assert.equal(calls, 0);
+		assert.deepEqual(mock.openedFiles, []);
+	}, { planner });
+});
+
+test("planner fallback can interpret misspelled target list requests", async () => {
+	let calls = 0;
+	const planner: AlfredPlanner = {
+		async plan(input) {
+			calls += 1;
+			assert.equal(input.inputText, "what are active tragets");
+			return { ok: true, intent: { kind: "list_targets" }, sanitizedInputSummary: { value: input.inputText, redaction: { status: "not_needed" } } };
+		},
+	};
+	await withDaemon(async (baseUrl, token) => {
+		const response = await postJson<{ ok: boolean; displayText: string }>(baseUrl, token, "/ask", {
+			requestId: "req_planner_target_typo",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "what are active tragets" },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.match(response.body.displayText, /Recent workspaces/);
+		assert.equal(calls, 1);
+	}, { planner });
+});
+
+test("planner missing target asks for clarification without creating a draft", async () => {
+	let calls = 0;
+	const planner: AlfredPlanner = {
+		async plan(input) {
+			calls += 1;
+			return { ok: true, intent: { kind: "draft_message_to_target", targetPhrase: "Missing Tab", targetKindHint: "tab", message: "hello" }, sanitizedInputSummary: { value: input.inputText, redaction: { status: "not_needed" } } };
+		},
+	};
+	await withDaemon(async (baseUrl, token, mock) => {
+		const response = await postJson<{ ok: boolean; displayText: string; pendingDraft?: AlfredDraft; errors?: Array<{ code: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_planner_missing_target",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "please get the missing tab to say hello" },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.equal(calls, 1);
+		assert.equal(response.body.pendingDraft, undefined);
+		assert.equal(response.body.errors?.[0]?.code, "target_not_found");
+		assert.match(response.body.displayText, /target phrase did not match|couldn't find/i);
+		assert.deepEqual(mock.sends, []);
+	}, { planner });
+});
+
+test("planner safe-action outputs execute through the action registry", async () => {
+	const intents: AlfredPlannerIntent[] = [
+		{ kind: "open_file", path: "package.json" },
+		{ kind: "open_markdown", path: "docs/plans/alfred-jarvis-roadmap/PLAN.md" },
+		{ kind: "open_url", url: "https://example.test/docs" },
+		{ kind: "open_browser", url: "https://example.test/app" },
+		{ kind: "read_notifications", filter: "unread", countOnly: true },
+	];
+	const planner: AlfredPlanner = {
+		async plan(input) {
+			const intent = intents.shift();
+			assert.ok(intent, "planner was called more times than expected");
+			return { ok: true, intent, sanitizedInputSummary: { value: input.inputText, redaction: { status: "not_needed" } } };
+		},
+	};
+	await withDaemon(async (baseUrl, token, mock) => {
+		const requests = [
+			{ requestId: "req_planner_open_file", text: "please show the project manifest" },
+			{ requestId: "req_planner_open_markdown", text: "please show the roadmap preview" },
+			{ requestId: "req_planner_open_url", text: "please open the docs link" },
+			{ requestId: "req_planner_open_browser", text: "please inspect the app in a browser" },
+			{ requestId: "req_planner_read_notifications", text: "please summarize pending notification count" },
+		];
+		const responses = [];
+		for (const request of requests) {
+			responses.push(await postJson<{ ok: boolean; displayText: string }>(baseUrl, token, "/ask", {
+				requestId: request.requestId,
+				createdAt: "2026-06-19T21:59:59.000Z",
+				source: piCommandSource(),
+				input: { text: request.text },
+			}));
+		}
+
+		assert.deepEqual(responses.map((response) => response.status), [200, 200, 200, 200, 200]);
+		assert.deepEqual(responses.map((response) => response.body.ok), [true, true, true, true, true]);
+		assert.deepEqual(mock.openedFiles.map((entry) => entry.path), ["package.json"]);
+		assert.deepEqual(mock.openedMarkdown.map((entry) => entry.path), ["docs/plans/alfred-jarvis-roadmap/PLAN.md"]);
+		assert.deepEqual(mock.openedUrls.map((entry) => entry.url), ["https://example.test/docs"]);
+		assert.deepEqual(mock.openedBrowsers.map((entry) => entry.url), ["https://example.test/app"]);
+		assert.match(responses[4]?.body.displayText ?? "", /There is 1 unread notification/);
+		assert.equal(intents.length, 0);
+	}, { planner });
+});
+
+test("planner safe-action output with unsafe path is denied", async () => {
+	const planner: AlfredPlanner = {
+		async plan(input) {
+			return { ok: true, intent: { kind: "open_file", path: "../secrets.txt" }, sanitizedInputSummary: { value: input.inputText, redaction: { status: "not_needed" } } };
+		},
+	};
+	await withDaemon(async (baseUrl, token, mock) => {
+		const response = await postJson<{ ok: boolean; errors?: Array<{ code: string }> }>(baseUrl, token, "/ask", {
+			requestId: "req_planner_unsafe_path",
+			createdAt: "2026-06-19T21:59:59.000Z",
+			source: piCommandSource(),
+			input: { text: "please open that sensitive path" },
+		});
+
+		assert.equal(response.status, 200);
+		assert.equal(response.body.ok, true);
+		assert.equal(response.body.errors?.[0]?.code, "invalid_request");
+		assert.deepEqual(mock.openedFiles, []);
 	}, { planner });
 });
 
@@ -1347,6 +1618,7 @@ test("daemon reports structured errors for bad JSON and unavailable cmux", async
 				async sendKeyToSurface() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async openDiff() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async openMarkdown() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
+				async openFile() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async openUrl() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async openBrowserSurface() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
 				async listNotifications() { return { ok: false, error: { code: "command_failed", message: "cmux missing" } }; },
@@ -1387,6 +1659,7 @@ test("natural-language confirm and cancel route before world lookup", async () =
 				async sendKeyToSurface() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
 				async openDiff() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
 				async openMarkdown() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
+				async openFile() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
 				async openUrl() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
 				async openBrowserSurface() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },
 				async listNotifications() { return { ok: false as const, error: { code: "command_failed" as const, message: "cmux missing" } }; },

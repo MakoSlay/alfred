@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { createAlfredDaemon, type AlfredDaemon, type AlfredDaemonConfig } from "../daemon/index.ts";
+import { createPlannerFromEnv } from "../planner/index.ts";
 import { formatHostForUrl } from "../lib/host-formatting.ts";
 import { defaultAlfredStorageDir } from "../storage/index.ts";
 
@@ -108,7 +109,9 @@ export async function runDaemonCli(options: RunDaemonCliOptions = {}): Promise<n
 		return 1;
 	}
 
-	const daemon = (options.createDaemon ?? createAlfredDaemon)(config.daemonConfig);
+	const daemon = options.createDaemon
+		? options.createDaemon(config.daemonConfig)
+		: createAlfredDaemon(config.daemonConfig, { planner: createPlannerFromEnv(options.env ?? process.env) });
 	stdout.write(formatDaemonStartupMessage(config));
 
 	try {

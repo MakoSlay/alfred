@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	buildPlannerInput,
+	buildPlannerMessages,
+	buildPlannerSystemPrompt,
+	createOpenAiToolPlanner,
+	createPlannerFromEnv,
 	extractJsonObjectCandidates,
 	parsePlannerIntent,
 	plannerInputLimit,
@@ -11,6 +15,18 @@ import {
 import { piCommandSource, powerCodeDraftRequest, powerCodeTarget } from "../src/testing/fixtures.ts";
 
 const sanitizedSummary = { value: "redacted request", redaction: { status: "not_needed" as const } };
+
+test("planner parser accepts strict draft_message_to_target JSON", () => {
+	const result = parsePlannerIntent('{"kind":"draft_message_to_target","targetPhrase":"Powerco","targetKindHint":"tab","message":"what are the redundant files"}', sanitizedSummary);
+
+	assert.equal(result.ok, true);
+	assert.equal(result.intent?.kind, "draft_message_to_target");
+	if (result.intent?.kind === "draft_message_to_target") {
+		assert.equal(result.intent.targetPhrase, "Powerco");
+		assert.equal(result.intent.targetKindHint, "tab");
+		assert.equal(result.intent.message, "what are the redundant files");
+	}
+});
 
 test("planner parser accepts strict draft_message JSON", () => {
 	const result = parsePlannerIntent('{"kind":"draft_message","targetRef":"surface:42","message":"Please list removable files."}', sanitizedSummary);
@@ -52,6 +68,60 @@ test("planner result validation rejects malformed draft or direct-send intents",
 	const missingTarget = validatePlannerResult({ ok: true, intent: { kind: "draft_message", message: "run" } }, sanitizedSummary);
 	assert.equal(missingTarget.ok, false);
 	assert.equal(missingTarget.errors?.[0]?.code, "target_not_found");
+});
+
+test("openai-compatible planner adapter calls chat completions and parses tool JSON", async () => {
+	let requestedUrl = "";
+	let requestedBody: Record<string, unknown> = {};
+	const planner = createOpenAiToolPlanner({
+		endpoint: "http://planner.test/v1",
+		model: "test-model",
+		fetchImpl: (async (url, init) => {
+			requestedUrl = String(url);
+			requestedBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+			return new Response(JSON.stringify({ choices: [{ message: { content: '{"kind":"draft_message_to_target","targetPhrase":"Powerco","targetKindHint":"tab","message":"hello"}' } }] }), { status: 200 });
+		}) as typeof fetch,
+	});
+	const input = buildPlannerInput(powerCodeDraftRequest(), piCommandSource(), [powerCodeTarget({ label: "Powerco" })]);
+
+	const result = await planner.plan(input);
+
+	assert.equal(requestedUrl, "http://planner.test/v1/chat/completions");
+	assert.equal(requestedBody.model, "test-model");
+	assert.equal(result.ok, true);
+	assert.equal(result.intent?.kind, "draft_message_to_target");
+});
+
+test("planner env factory is opt-in and respects disabled flag", () => {
+	assert.equal(createPlannerFromEnv({}), undefined);
+	assert.equal(createPlannerFromEnv({ ALFRED_PLANNER_ENABLED: "false", ALFRED_LLM_ENDPOINT: "http://planner.test/v1", ALFRED_LLM_MODEL: "model" }), undefined);
+	assert.notEqual(createPlannerFromEnv({ ALFRED_PLANNER_ENABLED: "true", ALFRED_LLM_ENDPOINT: "http://planner.test/v1", ALFRED_LLM_MODEL: "model" }), undefined);
+});
+
+test("planner system prompt is generic and project-agnostic", () => {
+	const prompt = buildPlannerSystemPrompt();
+	assert.doesNotMatch(prompt, /Powerco/i);
+	assert.match(prompt, /named project tab/);
+});
+
+test("planner prompt includes tool inventory and visible target context", () => {
+	const request = powerCodeDraftRequest();
+	request.input.text = "look at the Powerco tab and ask what are the redundant files";
+	const input = buildPlannerInput(request, piCommandSource(), [powerCodeTarget({ label: "Powerco" })]);
+	const messages = buildPlannerMessages(input);
+	const combined = messages.map((message) => message.content).join("\n");
+
+	assert.match(combined, /draft_message_to_target/);
+	assert.match(combined, /Return exactly one JSON object/);
+	assert.match(combined, /Powerco/);
+	assert.match(combined, /targetKindHint/);
+});
+
+test("planner validation rejects unsafe tool paths", () => {
+	const unsafe = validatePlannerResult({ ok: true, intent: { kind: "open_file", path: "../secrets.txt" } }, sanitizedSummary);
+
+	assert.equal(unsafe.ok, false);
+	assert.equal(unsafe.errors?.[0]?.code, "invalid_request");
 });
 
 test("planner input redacts and limits request text without transcript context", () => {

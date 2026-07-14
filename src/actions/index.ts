@@ -1,5 +1,6 @@
 import type { AlfredActionRiskLevel, AlfredCapability, AlfredEvent, AlfredId, AlfredRef, AlfredSource, AlfredTarget, PendingAction, TemporaryGrant } from "../contracts/runtime.ts";
 import type { CmuxWorldModelAdapter } from "../cmux/index.ts";
+import { isSafeRelativeMarkdownPath, isSafeRelativePath, normalizeHttpUrl } from "../validation/open.ts";
 export type { PendingAction, TemporaryGrant } from "../contracts/runtime.ts";
 
 // ─── risk levels ───
@@ -747,6 +748,7 @@ export function registerBuiltinActions(registry: ActionRegistry): void {
 		validateInput(input: unknown): string[] | null {
 			if (!isRecord(input)) return ["Input must be an object."];
 			if (typeof input.path !== "string" || !input.path.trim()) return ["Input.path must be a non-empty string."];
+			if (!isSafeRelativeMarkdownPath(input.path)) return ["Input.path must be a safe relative markdown path."];
 			return null;
 		},
 		buildPreview(input: { path: string }) {
@@ -777,6 +779,7 @@ export function registerBuiltinActions(registry: ActionRegistry): void {
 		validateInput(input: unknown): string[] | null {
 			if (!isRecord(input)) return ["Input must be an object."];
 			if (typeof input.path !== "string" || !input.path.trim()) return ["Input.path must be a non-empty string."];
+			if (!isSafeRelativePath(input.path)) return ["Input.path must be a safe relative path."];
 			return null;
 		},
 		buildPreview(input: { path: string }) {
@@ -807,6 +810,7 @@ export function registerBuiltinActions(registry: ActionRegistry): void {
 		validateInput(input: unknown): string[] | null {
 			if (!isRecord(input)) return ["Input must be an object."];
 			if (typeof input.url !== "string" || !input.url.trim()) return ["Input.url must be a non-empty string."];
+			if (!normalizeHttpUrl(input.url)) return ["Input.url must be a valid http(s) URL."];
 			return null;
 		},
 		buildPreview(input: { url: string }) {
@@ -928,7 +932,10 @@ export function registerBuiltinActions(registry: ActionRegistry): void {
 			requiredTargetCapabilities: [],
 			auditCategory: "cmux-open",
 		},
-		validateInput(): string[] | null {
+		validateInput(input: unknown): string[] | null {
+			if (input === undefined) return null;
+			if (!isRecord(input)) return ["Input must be an object."];
+			if (input.url !== undefined && (typeof input.url !== "string" || !normalizeHttpUrl(input.url))) return ["Input.url must be a valid http(s) URL."];
 			return null;
 		},
 		buildPreview(input: { url?: string }) {
