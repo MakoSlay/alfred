@@ -120,6 +120,7 @@ export function createAlfredLoopManager(dependencies: AlfredLoopManagerDependenc
 			status: "running",
 			turns: 0,
 			maxTurns: clampInt(request.maxTurns, 1, MAX_LOOP_TURNS),
+			autonomousSend: sourceHasCapabilities(effectiveSource, ["loop.autonomousSend"]),
 			startedAt: createdAt,
 			lastActivityAt: createdAt,
 			observeMode: "screen",

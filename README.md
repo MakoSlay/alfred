@@ -85,6 +85,13 @@ Alfred 2 speed knobs:
 - `ALFRED_CONTEXT_WORKSPACE_LIMIT=5` — inspects only the most recent/relevant workspaces per full-context request.
 - `ALFRED_PR_WATCHER=1` — poll GitHub unread notifications for PRs authored by you, notify via Alfred, and append simple entries to `~/.alfred/pr-watch-memory.md`.
 - `ALFRED_PR_WATCH_INTERVAL_MS=120000` — PR watcher poll interval; minimum 30000 ms.
+- `ALFRED_WORK_ADVISOR=1` — opt in to periodic evidence-gated work reviews. Background observation remains disabled unless `ALFRED_WORK_ADVISOR_WORKSPACE` is also set; explicit user-requested reviews remain available without it.
+- `ALFRED_WORK_ADVISOR_WORKSPACE=workspace:1` — exact cmux workspace ref covered by the background-observation grant. Alfred skips polls when that workspace is not the one selected.
+- `ALFRED_WORK_ADVISOR_INTERVAL_MS=600000` — work-advisor poll interval; default ten minutes, minimum one minute. Spoken work tips are capped at two per day and use the shared mute, meeting, dedupe, and cooldown policy. Terminal text is sent to the configured LLM after best-effort secret redaction but is never persisted.
+
+Durable goals and bounded schedules are stored in `~/.alfred/goals-and-jobs.json`. Describe goals, reminders, completions, cancellations, or requests for work advice naturally; the model selects strict `create_goal`, `update_goal`, `schedule_job`, `cancel_scheduled_job`, or `review_current_work` tools rather than relying on command-phrase regexes. Scheduled jobs can only deliver reminders or request a work review; they cannot execute shell commands or tools.
+
+Autonomy is deliberately scoped rather than global. Alfred 2 routine-mutation auto-approval lasts only for the current server session; session monitors separately store `replyMode: "draft" | "send"` for one exact target; daemon-owned loops separately report whether their source has the privileged `loop.autonomousSend` capability. Enabling one scope never enables another. The dashboard changes routine-mutation posture through `PUT /api/settings/autonomy` rather than conversational approval text.
 
 Daemon env config:
 

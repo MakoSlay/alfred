@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createFakeLlmClient } from "../src/alfred-2/agent.ts";
 import { AUTONOMOUS_SYSTEM_PROMPT, createWorkingAcknowledgement, isMacOpenCommand, resolveWorkspaceForRequest, runToolLoop, type BashExecutor, type ToolLoopEvent } from "../src/alfred-2/tool-loop.ts";
+import { GoalJobStore } from "../src/alfred-2/goals.ts";
+import { PendingConfirmationStore } from "../src/alfred-2/confirmation.ts";
 
 const CONTEXT = `WORKSPACES (2):
   Main [current] | ref:workspace:1 | /tmp/main | branch: main (clean)
@@ -265,6 +269,110 @@ test("multi-turn tool loop reports cumulative and current-context usage separate
 	assert.equal(result.sessionTokens, 42);
 	assert.ok(result.currentContextTokens > 0);
 	assert.ok(result.maxContextTokens >= result.currentContextTokens);
+});
+
+test("natural-language goal requests can be fulfilled through the goal tool", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "alfred-tool-goals-"));
+	try {
+		const goalJobStore = new GoalJobStore({ path: join(directory, "goals.json"), idFactory: () => "natural" });
+		const result = await runToolLoop({
+			llmClient: createFakeLlmClient([
+				'{"tool":"create_goal","title":"Keep proactive advice useful","notes":"Prefer natural language over command phrases"}',
+				'{"speech":"I have saved that goal, sir."}',
+			]),
+			userText: "I want you to keep your proactive advice useful, could you remember that as something we're aiming for?",
+			systemContext: CONTEXT,
+			requestId: "req-natural-goal",
+			sessionId: "sess-natural-goal",
+			goalJobStore,
+		});
+		assert.equal(result.outcome.status, "completed");
+		assert.equal(result.toolResults[0]?.tool, "create_goal");
+		assert.equal(goalJobStore.listGoals()[0]?.title, "Keep proactive advice useful");
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test("schedule_job selected from natural language is confirmation gated", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "alfred-tool-schedule-"));
+	try {
+		const goalJobStore = new GoalJobStore({ path: join(directory, "goals.json") });
+		const result = await runToolLoop({
+			llmClient: createFakeLlmClient([
+				'{"tool":"schedule_job","kind":"reminder","title":"Check the pull request","runAt":"2026-07-16T15:00:00.000Z"}',
+			]),
+			userText: "Give me a nudge at three this afternoon to check the pull request.",
+			systemContext: CONTEXT,
+			requestId: "req-natural-reminder",
+			sessionId: "sess-natural-reminder",
+			goalJobStore,
+			autoConfirm: true,
+		});
+		assert.equal(result.requiresConfirmation, true);
+		assert.match(result.confirmationPrompt ?? "", /schedule that reminder/i);
+		assert.equal(goalJobStore.listJobs().length, 0);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test("one confirmation authorizes only the stored schedule payload", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "alfred-tool-schedule-once-"));
+	try {
+		const goalJobStore = new GoalJobStore({ path: join(directory, "goals.json") });
+		const confirmationStore = new PendingConfirmationStore();
+		const pending = await runToolLoop({
+			llmClient: createFakeLlmClient(['{"tool":"schedule_job","kind":"reminder","title":"Approved","runAt":"2026-07-16T15:00:00Z"}']),
+			userText: "Schedule approved",
+			systemContext: CONTEXT,
+			requestId: "req-schedule-once-1",
+			sessionId: "sess-schedule-once",
+			goalJobStore,
+			confirmationStore,
+		});
+		assert.equal(pending.requiresConfirmation, true);
+
+		const followOn = await runToolLoop({
+			llmClient: createFakeLlmClient(['{"tool":"schedule_job","kind":"reminder","title":"Unapproved follow-on","runAt":"2026-07-16T16:00:00Z"}']),
+			userText: "Approve only the pending reminder",
+			systemContext: CONTEXT,
+			requestId: "req-schedule-once-2",
+			sessionId: "sess-schedule-once",
+			goalJobStore,
+			confirmationStore,
+			confirm: true,
+			confirmationId: pending.confirmationId,
+		});
+		assert.deepEqual(goalJobStore.listJobs().map((job) => job.title), ["Approved"]);
+		assert.equal(followOn.requiresConfirmation, true);
+		assert.equal(confirmationStore.count(), 1);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+test("completion guard corrects a false natural-language reminder claim into a schedule tool", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "alfred-tool-schedule-guard-"));
+	try {
+		const goalJobStore = new GoalJobStore({ path: join(directory, "goals.json") });
+		const result = await runToolLoop({
+			llmClient: createFakeLlmClient([
+				'{"speech":"I will remind you at three, sir."}',
+				'{"tool":"schedule_job","kind":"reminder","title":"Check the implementation","runAt":"2026-07-16T15:00:00.000Z"}',
+			]),
+			userText: "Later this afternoon at three, give me a nudge to check this implementation.",
+			systemContext: CONTEXT,
+			requestId: "req-natural-reminder-guard",
+			sessionId: "sess-natural-reminder-guard",
+			goalJobStore,
+		});
+		assert.equal(result.requiresConfirmation, true);
+		assert.equal(result.parserRetries, 0);
+		assert.equal(goalJobStore.listJobs().length, 0);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
 });
 
 test("crossing current-context threshold writes handoff before another LLM call", async () => {

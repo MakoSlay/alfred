@@ -30,6 +30,13 @@ test("tool registry contains first-phase tools and excludes deferred capabilitie
 		"docs_read",
 		"log_break",
 		"wellness_status",
+		"list_goals",
+		"create_goal",
+		"update_goal",
+		"list_scheduled_jobs",
+		"schedule_job",
+		"cancel_scheduled_job",
+		"review_current_work",
 	]);
 	assert.ok(DEFERRED_ALFRED_TOOLS.includes("subagents"));
 	assert.equal(isRegisteredToolName("bash"), true);

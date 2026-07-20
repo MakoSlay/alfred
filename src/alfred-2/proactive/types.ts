@@ -1,5 +1,5 @@
 export type ProactivePriority = "silent" | "low" | "normal" | "important" | "urgent";
-export type ProactiveKind = "wellness" | "stuck_work" | "slack_attention" | "meeting" | "todo" | "pr_notification";
+export type ProactiveKind = "wellness" | "stuck_work" | "work_advice" | "slack_attention" | "meeting" | "todo" | "pr_notification";
 export type ProactiveDelivery = "store_only" | "dashboard" | "notification" | "speech" | "draft";
 
 export type MeetingState = "in_meeting" | "maybe_in_meeting" | "not_in_meeting" | "unknown";

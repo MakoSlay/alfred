@@ -166,13 +166,101 @@ test("wellness break acknowledgement and snooze routes are deterministic", async
 	});
 });
 
+test("durable goals and scheduled reminders are available through structured APIs", async () => {
+	await withServer(async (baseUrl) => {
+		const addGoal = await fetch(`${baseUrl}/api/goals`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ title: "ship proactive advice" }),
+		});
+		const goalData = await addGoal.json() as { ok: boolean; goal: { id: string; title: string } };
+		assert.equal(addGoal.status, 201);
+		assert.equal(goalData.goal.title, "ship proactive advice");
+
+		const complete = await fetch(`${baseUrl}/api/goals/${goalData.goal.id}`, {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ status: "completed" }),
+		});
+		assert.equal(complete.status, 200);
+
+		const reminder = await fetch(`${baseUrl}/api/scheduled-jobs`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ kind: "reminder", title: "check the review", runAt: new Date(Date.now() + 15 * 60_000).toISOString() }),
+		});
+		const reminderData = await reminder.json() as { requiresConfirmation: boolean; confirmationId: string; preview: string };
+		assert.equal(reminder.status, 202);
+		assert.equal(reminderData.requiresConfirmation, true);
+		assert.match(reminderData.confirmationId, /^confirm-/);
+		assert.match(reminderData.preview, /SCHEDULE_JOB/);
+
+		const jobs = await fetch(`${baseUrl}/api/scheduled-jobs`);
+		const jobsData = await jobs.json() as { jobs: Array<{ id: string }> };
+		assert.equal(jobsData.jobs.length, 0);
+	});
+});
+
+test("typed autonomy settings are session-scoped and bare go ahead does not broaden permissions", async () => {
+	await withServer(async (baseUrl) => {
+		const enable = await fetch(`${baseUrl}/api/settings/autonomy`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ autoConfirm: true }),
+		});
+		assert.equal(enable.status, 200);
+		assert.deepEqual(await enable.json(), { ok: true, autoConfirm: true, scope: "session" });
+
+		await fetch(`${baseUrl}/api/settings/autonomy`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ autoConfirm: false }),
+		});
+		const conversational = await fetch(`${baseUrl}/ask`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ text: "go ahead", requestId: "req-go-ahead" }),
+		});
+		assert.equal(conversational.status, 200);
+		const state = await fetch(`${baseUrl}/dashboard/state`).then((response) => response.json()) as { autoConfirm: boolean; autoConfirmScope: string; sessionMonitors: unknown[] };
+		assert.equal(state.autoConfirm, false);
+		assert.equal(state.autoConfirmScope, "session");
+		assert.deepEqual(state.sessionMonitors, []);
+	});
+});
+
+test("state-changing APIs reject external origins, wrong media types, and malformed JSON", async () => {
+	await withServer(async (baseUrl) => {
+		const external = await fetch(`${baseUrl}/api/goals`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Origin: "https://evil.example" },
+			body: JSON.stringify({ title: "must not persist" }),
+		});
+		assert.equal(external.status, 403);
+
+		const wrongType = await fetch(`${baseUrl}/ask`, {
+			method: "POST",
+			headers: { "Content-Type": "text/plain" },
+			body: JSON.stringify({ text: "hello" }),
+		});
+		assert.equal(wrongType.status, 415);
+
+		const malformed = await fetch(`${baseUrl}/api/scheduled-jobs`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: "{not-json",
+		});
+		assert.equal(malformed.status, 400);
+	});
+});
+
 test("dashboard state and tools endpoints expose live controls", async () => {
 	await withServer(async (baseUrl) => {
 		const toolsResponse = await fetch(`${baseUrl}/tools`);
 		const tools = await toolsResponse.json() as { ok: boolean; count: number; names: string[]; contracts: Array<{ name: string }> };
 		assert.equal(toolsResponse.status, 200);
 		assert.equal(tools.ok, true);
-		assert.equal(tools.count, 26);
+		assert.equal(tools.count, 33);
 		assert.equal(tools.names.includes("bash"), true);
 		assert.equal(tools.contracts.some((contract) => contract.name === "remember"), true);
 		assert.equal(tools.contracts.some((contract) => contract.name === "search_knowledge"), true);
@@ -186,6 +274,9 @@ test("dashboard state and tools endpoints expose live controls", async () => {
 		assert.equal(tools.contracts.some((contract) => contract.name === "gmail_search"), true);
 		assert.equal(tools.contracts.some((contract) => contract.name === "calendar_today"), true);
 		assert.equal(tools.contracts.some((contract) => contract.name === "docs_read"), true);
+		assert.equal(tools.contracts.some((contract) => contract.name === "create_goal"), true);
+		assert.equal(tools.contracts.some((contract) => contract.name === "schedule_job"), true);
+		assert.equal(tools.contracts.some((contract) => contract.name === "review_current_work"), true);
 
 		const enable = await fetch(`${baseUrl}/ask`, {
 			method: "POST",
@@ -207,7 +298,7 @@ test("dashboard state and tools endpoints expose live controls", async () => {
 		assert.equal(state.ok, true);
 		assert.equal(state.autoConfirm, true);
 		assert.equal(state.toolRounds, 0);
-		assert.equal(state.tools.count, 26);
+		assert.equal(state.tools.count, 33);
 		assert.equal(state.listener.provider, "off");
 		assert.equal(state.listener.running, false);
 		assert.equal(state.recentResponses.some((entry) => entry.requestId === "req-dashboard-recall" && entry.userText === "please leave a previous response marker" && entry.responseText === "Done, sir."), true);

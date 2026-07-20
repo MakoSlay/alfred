@@ -95,12 +95,34 @@ export interface ListenerStatus {
   detail?: string;
 }
 
+export interface SessionMonitorSummary {
+  id: string;
+  workspaceRef: string;
+  workspaceName: string;
+  surfaceRef: string;
+  surfaceTitle: string;
+  status: "running" | "waiting" | "needs_user" | "done" | "failed" | "stopped";
+  replyMode: "draft" | "send";
+  turns: number;
+  maxTurns: number;
+  startedAt: string;
+  lastActivityAt: string;
+}
+
+export interface AutonomySettingsResponse {
+  ok: true;
+  autoConfirm: boolean;
+  scope: "session";
+}
+
 export interface DashboardState {
   ok: boolean;
   sessionId: string;
   muted: boolean;
   mutedUntil: string | null;
   autoConfirm: boolean;
+  autoConfirmScope?: "session";
+  sessionMonitors?: SessionMonitorSummary[];
   sessionTokens: number;
   currentContextTokens: number;
   maxContextTokens: number;
@@ -118,6 +140,7 @@ export interface DashboardState {
   personality: PersonalityConfig;
   listener: ListenerStatus;
   prWatcher: { enabled: boolean; [key: string]: unknown };
+  workAdvisor?: { autonomousEnabled: boolean; workspace: string | null; intervalMs: number; status: { consecutive: number; spokenToday: number; targetKey?: string; lastVerdictKey?: string } };
   recentResponses: RecentResponse[];
   lastUpdated: string;
 }

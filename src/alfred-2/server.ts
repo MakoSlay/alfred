@@ -23,7 +23,7 @@ import {
 	undoById,
 	clearUndoHistory,
 } from "./undo.ts";
-import { PendingConfirmationStore } from "./confirmation.ts";
+import { createConfirmationPreview, hashPayload, PendingConfirmationStore, ttlForRisk } from "./confirmation.ts";
 import type { AlfredToolCall } from "./tool-types.ts";
 import { ALFRED_TOOL_NAMES as REGISTERED_TOOLS } from "./tool-types.ts";
 import type { Alfred2ListenerStatus } from "./listener-types.ts";
@@ -32,6 +32,8 @@ import { getSnapshot, restoreActiveWorkAccumulator, SAMPLE_INTERVAL_MS, startAct
 import { createRuntimeInterruptionState } from "./proactive/runtime-state.ts";
 import { WellnessWatcher, saveFullWellnessState, loadFullWellnessState } from "./watchers/wellness.ts";
 import { PrNotificationWatcher, prWatcherEnabled, prWatcherIntervalMs as resolvePrWatcherIntervalMs, type PrWatcherStatus } from "./watchers/pr-notifications.ts";
+import { WorkAdvisor, DEFAULT_WORK_ADVISOR_INTERVAL_MS, shouldConsumeScheduledWorkReview } from "./watchers/work-advisor.ts";
+import { GoalJobStore, ScheduledJobRunner, parseScheduledTimestamp, validRecurrenceMinutes, validWorkReviewTargetRefs } from "./goals.ts";
 import { createStructuredFailure, createTaskOutcomeFinalizer, type TaskOutcome, type TaskOutcomeFinalizer } from "./capabilities/outcome.ts";
 import { SessionMonitorManager } from "./session-monitor.ts";
 
@@ -53,6 +55,10 @@ export interface Alfred2Config {
 	historyFile?: string;
 	/** Optional isolated knowledge directory for embedded runtimes and tests. */
 	knowledgeDirectory?: string;
+	/** Optional isolated durable goal/job path for embedded runtimes and tests. */
+	goalJobFile?: string;
+	/** Optional isolated work-advisor state path for embedded runtimes and tests. */
+	workAdvisorStateFile?: string;
 }
 
 export interface Alfred2ServerHandle {
@@ -78,6 +84,8 @@ interface DashboardState {
 	muted: boolean;
 	mutedUntil: string | null;
 	autoConfirm: boolean;
+	autoConfirmScope: "session";
+	sessionMonitors: ReturnType<SessionMonitorManager["list"]>;
 	sessionTokens: number;
 	currentContextTokens: number;
 	maxContextTokens: number;
@@ -95,6 +103,9 @@ interface DashboardState {
 	personality: AlfredPersonalityConfig;
 	listener: Alfred2ListenerStatus;
 	prWatcher: ({ enabled: false } | ({ enabled: true; intervalMs: number } & PrWatcherStatus));
+	workAdvisor: { autonomousEnabled: boolean; workspace: string | null; intervalMs: number; status: ReturnType<WorkAdvisor["getStatus"]> };
+	goals: ReturnType<GoalJobStore["listGoals"]>;
+	scheduledJobs: ReturnType<GoalJobStore["listJobs"]>;
 	recentResponses: DashboardRecentResponse[];
 	lastUpdated: string;
 }
@@ -423,6 +434,55 @@ const TOOL_CONTRACTS: DashboardToolContract[] = [
 		],
 		confirm: "none",
 	},
+	{
+		name: "list_goals",
+		description: "List durable goals, optionally filtered by status.",
+		schema: { tool: "list_goals", status: "optional active|completed|all" },
+		examples: ['{ "tool": "list_goals", "status": "active" }'],
+		confirm: "none",
+	},
+	{
+		name: "create_goal",
+		description: "Create a durable goal from a natural-language objective.",
+		schema: { tool: "create_goal", title: "string", notes: "optional string" },
+		examples: ['{ "tool": "create_goal", "title": "Ship Work Radar" }'],
+		confirm: "none",
+	},
+	{
+		name: "update_goal",
+		description: "Update or complete a durable goal by ID or exact title.",
+		schema: { tool: "update_goal", goalIdOrTitle: "string", title: "optional string", notes: "optional string", status: "optional active|completed" },
+		examples: ['{ "tool": "update_goal", "goalIdOrTitle": "Ship Work Radar", "status": "completed" }'],
+		confirm: "none",
+	},
+	{
+		name: "list_scheduled_jobs",
+		description: "List durable reminders and scheduled work reviews.",
+		schema: { tool: "list_scheduled_jobs", enabledOnly: "optional boolean" },
+		examples: ['{ "tool": "list_scheduled_jobs", "enabledOnly": true }'],
+		confirm: "none",
+	},
+	{
+		name: "schedule_job",
+		description: "Schedule a bounded reminder or work review. Never executes arbitrary commands.",
+		schema: { tool: "schedule_job", kind: "reminder|work_review", title: "string", runAt: "RFC3339 timestamp with explicit timezone", recurrenceMinutes: "optional integer 15..525600", workspaceRef: "required for work_review", surfaceRef: "required for work_review" },
+		examples: ['{ "tool": "schedule_job", "kind": "reminder", "title": "Check CI", "runAt": "2026-07-16T16:00:00Z" }'],
+		confirm: "confirm",
+	},
+	{
+		name: "cancel_scheduled_job",
+		description: "Cancel a durable scheduled job by ID.",
+		schema: { tool: "cancel_scheduled_job", jobId: "string" },
+		examples: ['{ "tool": "cancel_scheduled_job", "jobId": "job-example" }'],
+		confirm: "none",
+	},
+	{
+		name: "review_current_work",
+		description: "Review the exact focused cmux work surface for evidence-grounded status or advice.",
+		schema: { tool: "review_current_work" },
+		examples: ['{ "tool": "review_current_work" }'],
+		confirm: "none",
+	},
 ];
 
 export async function startAlfred2(config: Alfred2Config): Promise<Alfred2ServerHandle> {
@@ -434,6 +494,7 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 	const knowledgeStore = createKnowledgeStore(config.knowledgeDirectory ?? (config.profileFile ? join(dirname(config.profileFile), "knowledge") : getDefaultKnowledgeDirectory()));
 	const historyStore = config.historyFile ? createHistoryStore(config.historyFile) : getDefaultHistoryStore();
 	const { loadHistory, addHistoryEntry, getRecentHistory, searchHistory, saveHistory } = historyStore;
+	const goalJobStore = new GoalJobStore({ path: config.goalJobFile ?? (config.historyFile ? join(dirname(config.historyFile), "goals-and-jobs.json") : undefined) });
 	const confirmationStore = new PendingConfirmationStore<AlfredToolCall>();
 	const sessionMonitorManager = new SessionMonitorManager({ llmClient });
 	const eventBus = createAlfredEventBus();
@@ -481,7 +542,23 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 	const prWatcher = prWatchEnabled
 		? new PrNotificationWatcher({ delivery: { speak, notify, isMuted } })
 		: null;
+	const runtimeInterruptionState = () => createRuntimeInterruptionState({ muted: isMuted(), mutedUntil, activitySnapshot: getSnapshot() });
+	const workAdvisorWorkspace = process.env.ALFRED_WORK_ADVISOR_WORKSPACE?.trim();
+	const workAdvisorRequested = /^(1|true|yes|on)$/i.test(process.env.ALFRED_WORK_ADVISOR ?? "");
+	const workAdvisorAutonomousEnabled = workAdvisorRequested && Boolean(workAdvisorWorkspace);
+	if (workAdvisorRequested && !workAdvisorWorkspace) console.warn("[work-advisor] background observation requires ALFRED_WORK_ADVISOR_WORKSPACE to scope the grant.");
+	const workAdvisorIntervalMs = Math.max(60_000, Number.parseInt(process.env.ALFRED_WORK_ADVISOR_INTERVAL_MS ?? "", 10) || DEFAULT_WORK_ADVISOR_INTERVAL_MS);
+	// The advisor is always available for explicit, confirmation-scoped requests.
+	// Only periodic background observation is controlled by ALFRED_WORK_ADVISOR.
+	const workAdvisor = new WorkAdvisor({ llmClient, delivery: { speak, notify, isMuted }, runtime: runtimeInterruptionState, history: () => getRecentHistory(5), statePath: config.workAdvisorStateFile ?? (config.historyFile ? join(dirname(config.historyFile), "work-advisor-state.json") : undefined) });
+	const scheduledJobRunner = new ScheduledJobRunner({
+		store: goalJobStore,
+		delivery: { speak, notify, isMuted },
+		runtime: runtimeInterruptionState,
+		onWorkReview: async (job) => shouldConsumeScheduledWorkReview(await workAdvisor.tick({ targetWorkspace: job.workspaceRef, targetSurface: job.surfaceRef })),
+	});
 	let prWatchInFlight = false;
+	let workAdvisorInFlight = false;
 	startActivitySampler();
 	const wellnessInterval = setInterval(() => {
 		const snapshot = getSnapshot();
@@ -535,6 +612,15 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 		: null;
 	prWatchInterval?.unref();
 	if (prWatcher) void tickPrWatcher();
+	const scheduledJobInterval = setInterval(() => { void scheduledJobRunner.tick().catch(() => {}); }, 30_000);
+	scheduledJobInterval.unref();
+	void scheduledJobRunner.tick().catch(() => {});
+	const workAdvisorInterval = workAdvisorAutonomousEnabled ? setInterval(() => {
+		if (workAdvisorInFlight) return;
+		workAdvisorInFlight = true;
+		void workAdvisor.tick({ targetWorkspace: workAdvisorWorkspace }).catch(() => {}).finally(() => { workAdvisorInFlight = false; });
+	}, workAdvisorIntervalMs) : null;
+	workAdvisorInterval?.unref();
 
 	function buildDashboardState(): DashboardState {
 		const profile = profileStore.loadProfile();
@@ -570,6 +656,8 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 			muted: mutedUntil !== null,
 			mutedUntil,
 			autoConfirm,
+			autoConfirmScope: "session",
+			sessionMonitors: sessionMonitorManager.list(),
 			sessionTokens: sessionMemory.cumulativeTotalTokens,
 			currentContextTokens: sessionMemory.currentContextTokens,
 			maxContextTokens: sessionMemory.maxContextTokens,
@@ -598,6 +686,9 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 			personality: getPersonalityConfig(),
 			listener: config.listenerStatus?.() ?? createOffListenerStatus(),
 			prWatcher: prWatcher ? { enabled: true, intervalMs: prWatchIntervalMs, ...prWatcher.getStatus() } : { enabled: false },
+			workAdvisor: { autonomousEnabled: workAdvisorAutonomousEnabled, workspace: workAdvisorWorkspace ?? null, intervalMs: workAdvisorIntervalMs, status: workAdvisor.getStatus() },
+			goals: goalJobStore.listGoals(),
+			scheduledJobs: goalJobStore.listJobs(),
 			recentResponses,
 			lastUpdated: new Date().toISOString(),
 		};
@@ -648,9 +739,11 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 
 	async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? config.host}`);
-		if (isKnowledgeApiPath(url.pathname) && !isAllowedKnowledgeOrigin(req.headers.origin)) {
+		const stateChanging = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
+		const privateRead = isKnowledgeApiPath(url.pathname) || url.pathname === "/api/goals" || url.pathname === "/api/scheduled-jobs";
+		if ((stateChanging || privateRead) && !isAllowedLocalOrigin(req.headers.origin)) {
 			res.writeHead(403, { "Content-Type": "application/json" });
-			res.end(JSON.stringify({ ok: false, error: "Knowledge API requests must originate from a loopback origin." }));
+			res.end(JSON.stringify({ ok: false, error: "State-changing and private API requests must originate from a loopback origin." }));
 			return;
 		}
 
@@ -683,6 +776,17 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 		if (req.method === "GET" && url.pathname === "/dashboard/state") {
 			res.writeHead(200, { "Content-Type": "application/json" });
 			res.end(JSON.stringify({ ok: true, ...buildDashboardState() }));
+			return;
+		}
+
+		if (req.method === "PUT" && url.pathname === "/api/settings/autonomy") {
+			const body = await readJsonBody(req);
+			if (typeof body?.autoConfirm !== "boolean" || Object.keys(body).some((key) => key !== "autoConfirm")) {
+				throw new HttpRequestError(400, "autoConfirm must be the only field and must be a boolean.");
+			}
+			autoConfirm = body.autoConfirm;
+			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+			res.end(JSON.stringify({ ok: true, autoConfirm, scope: "session" }));
 			return;
 		}
 
@@ -920,6 +1024,113 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 			return;
 		}
 
+		// Durable goals and bounded scheduled jobs. Jobs can remind or request a
+		// work-advisor review; they can never execute arbitrary commands/tools.
+		if (req.method === "GET" && url.pathname === "/api/goals") {
+			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+			res.end(JSON.stringify({ ok: true, store: goalJobStore.getStatus(), goals: goalJobStore.listGoals() }));
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/api/goals") {
+			const body = await readJsonBody(req);
+			try {
+				const goal = goalJobStore.createGoal(typeof body?.title === "string" ? body.title : "", typeof body?.notes === "string" ? body.notes : undefined);
+				res.writeHead(201, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+				res.end(JSON.stringify({ ok: true, goal }));
+			} catch (cause) {
+				res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+				res.end(JSON.stringify({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }));
+			}
+			return;
+		}
+
+		if (req.method === "PATCH") {
+			const goalMatch = url.pathname.match(/^\/api\/goals\/([^/]+)$/);
+			if (goalMatch) {
+				const body = await readJsonBody(req);
+				try {
+					const status = body?.status === "active" || body?.status === "completed" ? body.status : undefined;
+					const goal = goalJobStore.updateGoal(decodeURIComponent(goalMatch[1] ?? ""), {
+						title: typeof body?.title === "string" ? body.title : undefined,
+						notes: typeof body?.notes === "string" ? body.notes : undefined,
+						status,
+					});
+					res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+					res.end(JSON.stringify({ ok: true, goal }));
+				} catch (cause) {
+					res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+					res.end(JSON.stringify({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }));
+				}
+				return;
+			}
+		}
+
+		if (req.method === "GET" && url.pathname === "/api/scheduled-jobs") {
+			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+			res.end(JSON.stringify({ ok: true, store: goalJobStore.getStatus(), jobs: goalJobStore.listJobs() }));
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/api/scheduled-jobs") {
+			const body = await readJsonBody(req);
+			try {
+				if (body?.kind !== "reminder" && body?.kind !== "work_review") throw new Error("kind must be reminder or work_review.");
+				if (typeof body.title !== "string" || !body.title.trim()) throw new Error("title is required.");
+				if (typeof body.runAt !== "string" || !parseScheduledTimestamp(body.runAt)) throw new Error("runAt must be an RFC3339 timestamp with an explicit timezone.");
+				if (body.recurrenceMinutes !== undefined && (typeof body.recurrenceMinutes !== "number" || !validRecurrenceMinutes(body.recurrenceMinutes))) throw new Error("recurrenceMinutes is outside the supported range.");
+				if (body.kind === "work_review" && !validWorkReviewTargetRefs(typeof body.workspaceRef === "string" ? body.workspaceRef : undefined, typeof body.surfaceRef === "string" ? body.surfaceRef : undefined)) throw new Error("work_review requires exact workspaceRef and surfaceRef values.");
+				const toolCall: AlfredToolCall = {
+					tool: "schedule_job",
+					kind: body.kind,
+					title: typeof body.title === "string" ? body.title : "",
+					runAt: typeof body.runAt === "string" ? body.runAt : "",
+					recurrenceMinutes: typeof body.recurrenceMinutes === "number" ? body.recurrenceMinutes : undefined,
+					workspaceRef: typeof body.workspaceRef === "string" ? body.workspaceRef : undefined,
+					surfaceRef: typeof body.surfaceRef === "string" ? body.surfaceRef : undefined,
+				};
+				// Validate through the store contract without mutating it by checking the
+				// same fields here; execution occurs only through the confirmation flow.
+				const preview = createConfirmationPreview(toolCall);
+				const now = new Date();
+				const confirmationId = `confirm-${randomUUID()}`;
+				confirmationStore.add({
+					confirmationId,
+					requestId: `api-schedule-${randomUUID()}`,
+					toolCallId: `tool-${randomUUID()}`,
+					tool: "schedule_job",
+					risk: "mutation",
+					payload: toolCall,
+					payloadHash: hashPayload(toolCall),
+					preview,
+					createdAt: now.toISOString(),
+					expiresAt: new Date(now.getTime() + ttlForRisk("mutation")).toISOString(),
+				});
+				res.writeHead(202, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+				res.end(JSON.stringify({ ok: true, requiresConfirmation: true, confirmationId, preview }));
+			} catch (cause) {
+				res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+				res.end(JSON.stringify({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }));
+			}
+			return;
+		}
+
+		if (req.method === "DELETE") {
+			const jobMatch = url.pathname.match(/^\/api\/scheduled-jobs\/([^/]+)$/);
+			if (jobMatch) {
+				try {
+					const id = decodeURIComponent(jobMatch[1] ?? "");
+					const removed = goalJobStore.cancelJob(id);
+					res.writeHead(removed ? 200 : 404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+					res.end(JSON.stringify(removed ? { ok: true, removed: true, id } : { ok: false, removed: false, error: "Scheduled job not found." }));
+				} catch (cause) {
+					res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+					res.end(JSON.stringify({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }));
+				}
+				return;
+			}
+		}
+
 		// Mute endpoints
 		if (req.method === "POST" && url.pathname === "/mute") {
 			const body = await readJsonBody(req);
@@ -1115,9 +1326,9 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 			// Auto-confirm toggles (session scoped). When an approval is pending,
 			// natural replies like "go ahead" must flow into the confirmation resolver
 			// instead of turning on global auto-confirm.
-			if (confirmationStore.count() === 0 && /^(?:yes to all|go ahead|stop asking|auto (?:confirm|approve)|don't ask|dont ask|stop confirming|approve all|confirm all)$/i.test(userText)) {
+			if (confirmationStore.count() === 0 && /^(?:yes to all|stop asking|auto (?:confirm|approve)|don't ask|dont ask|stop confirming|approve all|confirm all)$/i.test(userText)) {
 				autoConfirm = true;
-				const msg = "Auto-confirm enabled. I'll still ask before destructive work.";
+				const msg = "Routine local mutation auto-approval is enabled for this session. Sends, monitors, imports, schedules, and destructive work still require approval.";
 				notifyAction(msg);
 				res.writeHead(200, { "Content-Type": "application/json" });
 				res.end(JSON.stringify({ ok: true, requestId, sessionId, speech: msg, displayText: msg, autoConfirm }));
@@ -1245,6 +1456,8 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 				confirmationId: typeof body?.confirmationId === "string" ? body.confirmationId : undefined,
 				autoConfirm,
 				sessionMonitorManager,
+				goalJobStore,
+				workAdvisor,
 				memory: sessionMemory,
 				confirmationStore,
 				speakAcknowledgements: body?.playback !== "browser",
@@ -1395,6 +1608,8 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 					clearInterval(historySaveInterval);
 					clearInterval(wellnessInterval);
 					if (prWatchInterval) clearInterval(prWatchInterval);
+					if (workAdvisorInterval) clearInterval(workAdvisorInterval);
+					clearInterval(scheduledJobInterval);
 					process.off("SIGTERM", saveHistoryOnSignal);
 					process.off("SIGINT", saveHistoryOnSignal);
 					process.off("beforeExit", saveHistoryOnSignal);
@@ -1574,7 +1789,7 @@ function isKnowledgeApiPath(pathname: string): boolean {
 	return pathname.startsWith("/api/memory/knowledge/") || pathname.startsWith("/dashboard/knowledge/");
 }
 
-function isAllowedKnowledgeOrigin(origin: string | undefined): boolean {
+function isAllowedLocalOrigin(origin: string | undefined): boolean {
 	if (!origin) return true;
 	try {
 		return isLoopbackHost(new URL(origin).hostname);
@@ -1584,12 +1799,12 @@ function isAllowedKnowledgeOrigin(origin: string | undefined): boolean {
 }
 
 async function readKnowledgeJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | null> {
-	const contentType = req.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
-	if (contentType !== "application/json") throw new HttpRequestError(415, "Knowledge API requests require Content-Type: application/json.");
 	return readJsonBody(req, 5 * 1024 * 1024);
 }
 
-async function readJsonBody(req: IncomingMessage, maxBytes = Number.POSITIVE_INFINITY): Promise<Record<string, unknown> | null> {
+async function readJsonBody(req: IncomingMessage, maxBytes = 1024 * 1024): Promise<Record<string, unknown> | null> {
+	const contentType = req.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+	if (contentType !== "application/json") throw new HttpRequestError(415, "JSON requests require Content-Type: application/json.");
 	return new Promise((resolve, reject) => {
 		const chunks: Buffer[] = [];
 		let bytes = 0;
@@ -1608,13 +1823,19 @@ async function readJsonBody(req: IncomingMessage, maxBytes = Number.POSITIVE_INF
 				reject(new HttpRequestError(413, `Request body exceeds ${maxBytes} bytes.`));
 				return;
 			}
-			try {
-				const raw = Buffer.concat(chunks).toString("utf-8");
-				resolve(raw ? JSON.parse(raw) : null);
-			} catch {
+			const raw = Buffer.concat(chunks).toString("utf-8");
+			if (!raw) {
 				resolve(null);
+				return;
+			}
+			try {
+				const value = JSON.parse(raw) as unknown;
+				if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("JSON body must be an object.");
+				resolve(value as Record<string, unknown>);
+			} catch {
+				reject(new HttpRequestError(400, "Request body must contain a valid JSON object."));
 			}
 		});
-		req.on("error", (err) => { console.warn("[server] request body read error:", err.message); resolve(null); });
+		req.on("error", (error) => reject(new HttpRequestError(400, `Could not read request body: ${error.message}`)));
 	});
 }

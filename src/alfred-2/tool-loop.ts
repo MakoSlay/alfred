@@ -30,8 +30,10 @@ import { wellnessStatus } from "./tools/wellness-status.ts";
 import { inspectSession, type SessionExecFn } from "./tools/session.ts";
 import { sendSessionMessage } from "./tools/session-message.ts";
 import { type SessionMonitorManager } from "./session-monitor.ts";
+import type { GoalJobStore } from "./goals.ts";
+import type { WorkAdvisor } from "./watchers/work-advisor.ts";
 import { calendarToday, calendarUpcoming, docsRead, docsSearch, gmailRead, gmailSearch } from "./tools/google.ts";
-import { classifyToolRisk } from "./risk.ts";
+import { classifyToolRisk, effectiveConfirmationRequirement } from "./risk.ts";
 import { speak, type SpeechLifecycleEvent } from "./speech.ts";
 import type { SessionMemory } from "./memory.ts";
 import type { ProfileStore } from "./profile.ts";
@@ -91,6 +93,8 @@ export interface ToolLoopOptions {
 	executeBash?: BashExecutor;
 	inspectSessionExec?: SessionExecFn;
 	sessionMonitorManager?: SessionMonitorManager;
+	goalJobStore?: GoalJobStore;
+	workAdvisor?: WorkAdvisor;
 	cwdOverride?: string;
 	onEvent?: (event: ToolLoopEvent) => void;
 	onSpeechEvent?: (event: SpeechLifecycleEvent) => void;
@@ -369,7 +373,6 @@ export async function runToolLoop(options: ToolLoopOptions): Promise<ToolLoopRes
 	let citationCorrectionCount = 0;
 	let unresolvedToolFailure: { tool: string; failure: StructuredFailure } | undefined;
 	const completedActions = new Set<string>();
-	const confirmedPayloadHashes = new Set<string>();
 	const availableCitations = new Map<string, KnowledgeCitation>();
 
 	// Handle explicit API confirmation before any LLM calls.
@@ -377,9 +380,14 @@ export async function runToolLoop(options: ToolLoopOptions): Promise<ToolLoopRes
 		const lookup = options.confirmationId ? confirmationStore.lookup(options.confirmationId) : undefined;
 		const pending = lookup?.kind === "found" ? lookup.confirmation : options.confirmationId ? null : confirmationStore.getSole();
 		if (pending) {
+			if (!confirmationStore.verifyIntegrity(pending.confirmationId)) {
+				return finish("That stored confirmation failed its integrity check, sir.", "The pending action changed after it was presented and was blocked.", now, {
+					status: "blocked",
+					failure: failure("authorize", "policy.blocked", "confirmation", "Pending confirmation payload integrity check failed.", false),
+				});
+			}
 			confirmationStore.remove(pending.confirmationId);
-			confirmedPayloadHashes.add(hashPayload(pending.payload));
-			const action = await executeTool(pending.payload, `[confirmed ${pending.confirmationId}]`);
+			const action = await executeTool(pending.payload, `[confirmed ${pending.confirmationId}]`, undefined, true);
 			if (action.done) return action.result;
 		} else if (lookup?.kind === "expired") {
 			return finish("That confirmation has expired, sir.", "The requested confirmation expired before execution.", now, {
@@ -411,9 +419,14 @@ export async function runToolLoop(options: ToolLoopOptions): Promise<ToolLoopRes
 					failure: failure("authorize", "resolution.ambiguous_request", "confirmation", "Approval target was ambiguous.", false),
 				});
 			}
+			if (!confirmationStore.verifyIntegrity(pending.confirmationId)) {
+				return finish("That stored confirmation failed its integrity check, sir.", "The pending action changed after it was presented and was blocked.", now, {
+					status: "blocked",
+					failure: failure("authorize", "policy.blocked", "confirmation", "Pending confirmation payload integrity check failed.", false),
+				});
+			}
 			confirmationStore.remove(pending.confirmationId);
-			confirmedPayloadHashes.add(hashPayload(pending.payload));
-			const action = await executeTool(pending.payload, `[confirmed ${pending.confirmationId}]`);
+			const action = await executeTool(pending.payload, `[confirmed ${pending.confirmationId}]`, undefined, true);
 			if (action.done) return action.result;
 		} else if (resolution.intent === "deny") {
 			const pending = selectPendingConfirmation(resolution.confirmationId, pendingConfirmations);
@@ -565,7 +578,7 @@ export async function runToolLoop(options: ToolLoopOptions): Promise<ToolLoopRes
 		return workspaceResolution.workspace?.ref;
 	}
 
-	async function executeTool(toolCall: AlfredToolCall, rawAssistantText: string, _parsed?: Extract<AlfredParseResult, { kind: "tool" }>): Promise<{ done: false } | { done: true; result: ToolLoopResult }> {
+	async function executeTool(toolCall: AlfredToolCall, rawAssistantText: string, _parsed?: Extract<AlfredParseResult, { kind: "tool" }>, authorizedStoredPayload = false): Promise<{ done: false } | { done: true; result: ToolLoopResult }> {
 		if (toolRounds >= maxToolRounds) {
 			events.push({ type: "max_rounds", message: "Maximum tool rounds reached" });
 			return { done: true, result: finish("I hit my tool limit before finishing, sir.", "Maximum tool rounds reached before final speech.", now, maxRoundsTerminal()) };
@@ -583,22 +596,16 @@ export async function runToolLoop(options: ToolLoopOptions): Promise<ToolLoopRes
 			speak(createWorkingAcknowledgement(options.userText, toolCall), { onEvent: options.onSpeechEvent }).catch(() => {});
 		}
 
-		// Confirmation gate for risky operations
-		const payloadAlreadyConfirmed = confirmedPayloadHashes.has(hashPayload(toolCall));
-		if (!options.confirm && !payloadAlreadyConfirmed) {
-			if (riskClassification.confirmation === "blocked") {
-				return { done: true, result: finish("That operation is blocked for safety, sir.", `Blocked operation: ${toolCall.tool}`, now, {
-					status: "blocked",
-					failure: failure("authorize", "policy.blocked", "risk-policy", `Blocked operation: ${toolCall.tool}`, false),
-				}) };
-			}
-			// In auto-confirm mode, skip most "confirm" level work (edits, writes, git commits)
-			// but still enforce explicit/destructive operations, first-class cmux message sends,
-			// and background monitors that may draft/send later.
-			const confirmationAlwaysRequired = toolCall.tool === "send_session_message" || toolCall.tool === "start_session_monitor" || toolCall.tool === "import_knowledge";
-			const effectiveConfirmation = options.autoConfirm && riskClassification.confirmation === "confirm" && !confirmationAlwaysRequired
-				? "none"
-				: riskClassification.confirmation;
+		// A stored confirmation authorizes exactly one immutable payload. Blocked
+		// operations remain blocked even if a stale caller presents an approval.
+		if (riskClassification.confirmation === "blocked") {
+			return { done: true, result: finish("That operation is blocked for safety, sir.", `Blocked operation: ${toolCall.tool}`, now, {
+				status: "blocked",
+				failure: failure("authorize", "policy.blocked", "risk-policy", `Blocked operation: ${toolCall.tool}`, false),
+			}) };
+		}
+		if (!authorizedStoredPayload) {
+			const effectiveConfirmation = effectiveConfirmationRequirement(riskClassification, options.autoConfirm === true);
 			if (effectiveConfirmation === "confirm" || effectiveConfirmation === "explicit") {
 				return requireConfirmation(toolCall, toolCallId, cwd ?? "", riskClassification.risk);
 			}
@@ -718,6 +725,63 @@ export async function runToolLoop(options: ToolLoopOptions): Promise<ToolLoopRes
 				return recordToolResult(logBreak(ctx), rawAssistantText);
 			case "wellness_status":
 				return recordToolResult(wellnessStatus(ctx), rawAssistantText);
+			case "list_goals": {
+				if (!options.goalJobStore) return recordToolResult(unavailableToolResult(toolCall, toolCallId, riskClassification.risk, "goal store"), rawAssistantText);
+				const goals = options.goalJobStore.listGoals().filter((goal) => !toolCall.status || toolCall.status === "all" || goal.status === toolCall.status);
+				const text = goals.length > 0 ? goals.map((goal) => `${goal.id}: [${goal.status}] ${goal.title}`).join("\n") : "No matching goals.";
+				return recordToolResult(makeToolResult(toolCall, toolCallId, true, text, { goals }, riskClassification.risk, false), rawAssistantText);
+			}
+			case "create_goal": {
+				if (!options.goalJobStore) return recordToolResult(unavailableToolResult(toolCall, toolCallId, riskClassification.risk, "goal store"), rawAssistantText);
+				try {
+					const goal = options.goalJobStore.createGoal(toolCall.title, toolCall.notes);
+					return recordToolResult(makeToolResult(toolCall, toolCallId, true, `Created goal ${goal.id}: ${goal.title}`, { goal }, riskClassification.risk, false), rawAssistantText);
+				} catch (cause) {
+					return recordToolResult(failedLocalToolResult(toolCall, toolCallId, riskClassification.risk, cause), rawAssistantText);
+				}
+			}
+			case "update_goal": {
+				if (!options.goalJobStore) return recordToolResult(unavailableToolResult(toolCall, toolCallId, riskClassification.risk, "goal store"), rawAssistantText);
+				try {
+					const goal = options.goalJobStore.updateGoal(toolCall.goalIdOrTitle, { title: toolCall.title, notes: toolCall.notes, status: toolCall.status });
+					return recordToolResult(makeToolResult(toolCall, toolCallId, true, `Updated goal ${goal.id}: ${goal.title} [${goal.status}]`, { goal }, riskClassification.risk, false), rawAssistantText);
+				} catch (cause) {
+					return recordToolResult(failedLocalToolResult(toolCall, toolCallId, riskClassification.risk, cause), rawAssistantText);
+				}
+			}
+			case "list_scheduled_jobs": {
+				if (!options.goalJobStore) return recordToolResult(unavailableToolResult(toolCall, toolCallId, riskClassification.risk, "scheduled job store"), rawAssistantText);
+				const jobs = options.goalJobStore.listJobs().filter((job) => toolCall.enabledOnly === false || job.enabled);
+				const text = jobs.length > 0 ? jobs.map((job) => `${job.id}: ${job.kind} at ${job.runAt}${job.enabled ? "" : " [disabled]"} — ${job.title}`).join("\n") : "No matching scheduled jobs.";
+				return recordToolResult(makeToolResult(toolCall, toolCallId, true, text, { jobs }, riskClassification.risk, false), rawAssistantText);
+			}
+			case "schedule_job": {
+				if (!options.goalJobStore) return recordToolResult(unavailableToolResult(toolCall, toolCallId, riskClassification.risk, "scheduled job store"), rawAssistantText);
+				if (toolCall.kind === "work_review" && !options.workAdvisor) return recordToolResult(unavailableToolResult(toolCall, toolCallId, riskClassification.risk, "work advisor"), rawAssistantText);
+				try {
+					const job = options.goalJobStore.scheduleJob({ kind: toolCall.kind, title: toolCall.title, runAt: toolCall.runAt, recurrenceMinutes: toolCall.recurrenceMinutes, workspaceRef: toolCall.workspaceRef, surfaceRef: toolCall.surfaceRef });
+					return recordToolResult(makeToolResult(toolCall, toolCallId, true, `Scheduled ${job.id} for ${job.runAt}: ${job.title}`, { job }, riskClassification.risk, false), rawAssistantText);
+				} catch (cause) {
+					return recordToolResult(failedLocalToolResult(toolCall, toolCallId, riskClassification.risk, cause), rawAssistantText);
+				}
+			}
+			case "cancel_scheduled_job": {
+				if (!options.goalJobStore) return recordToolResult(unavailableToolResult(toolCall, toolCallId, riskClassification.risk, "scheduled job store"), rawAssistantText);
+				try {
+					const removed = options.goalJobStore.cancelJob(toolCall.jobId);
+					return recordToolResult(makeToolResult(toolCall, toolCallId, removed, removed ? `Cancelled ${toolCall.jobId}.` : `Scheduled job ${toolCall.jobId} was not found.`, { removed, jobId: toolCall.jobId }, riskClassification.risk, false), rawAssistantText);
+				} catch (cause) {
+					return recordToolResult(failedLocalToolResult(toolCall, toolCallId, riskClassification.risk, cause), rawAssistantText);
+				}
+			}
+			case "review_current_work": {
+				if (!options.workAdvisor) return recordToolResult(unavailableToolResult(toolCall, toolCallId, riskClassification.risk, "work advisor"), rawAssistantText);
+				const review = await options.workAdvisor.tick({ deliver: false });
+				const target = review.snapshot ? { workspaceName: review.snapshot.workspaceName, surfaceTitle: review.snapshot.surfaceTitle } : undefined;
+				const verdict = review.verdict ? { kind: review.verdict.kind, confidence: review.verdict.confidence, summary: review.verdict.summary, advice: review.verdict.advice, evidenceKey: review.verdict.evidenceKey } : undefined;
+				const text = verdict ? `${target?.workspaceName ?? "Current work"} / ${target?.surfaceTitle ?? "current surface"}: ${verdict.summary}${verdict.advice ? ` Advice: ${verdict.advice}` : ""}` : `Work review produced no actionable verdict (${review.reason ?? "unknown"}).`;
+				return recordToolResult(makeToolResult(toolCall, toolCallId, true, text, { delivered: review.delivered, reason: review.reason, target, verdict }, riskClassification.risk, false), rawAssistantText);
+			}
 			default:
 				return recordToolResult(makeToolResult(toolCall, toolCallId, false, `${(toolCall as AlfredToolCall).tool} is not implemented.`, undefined, riskClassification.risk, false, "none", failure("execute", "execution.internal_error", "tool-registry", "Registered tool has no implementation.", false)), rawAssistantText);
 		}
@@ -737,6 +801,11 @@ export async function runToolLoop(options: ToolLoopOptions): Promise<ToolLoopRes
 		toolRounds++;
 		if (result.success) {
 			executed = true;
+			if (result.tool === "create_goal") completedActions.add("goal_create");
+			if (result.tool === "update_goal") completedActions.add("goal_update");
+			if (result.tool === "schedule_job") completedActions.add("schedule");
+			if (result.tool === "cancel_scheduled_job") completedActions.add("schedule_cancel");
+			if (result.tool === "review_current_work") completedActions.add("work_review");
 			if (unresolvedToolFailure?.tool === result.tool) unresolvedToolFailure = undefined;
 		} else {
 			unresolvedToolFailure = {
@@ -962,17 +1031,38 @@ function finalIsClarificationOrFailure(speech: string, displayText: string): boo
 }
 
 function missingActionCompletionCorrection(userText: string, speech: string, displayText: string, completedActions: ReadonlySet<string>): string | null {
-	if (!requestAsksToOpenLocalThing(userText)) return null;
-	if (completedActions.has("open")) return null;
 	if (finalIsClarificationOrFailure(speech, displayText)) return null;
-	return "ACTION COMPLETION CHECK FAILED: The user asked you to open something on macOS, but no successful bash command using the system `open` command has run. Discovery commands like `ls`, `find`, `test`, or `pwd` do not open anything. If you know the path, URL, app, PR, or link, return a bash tool call that runs `open` with proper shell quoting. If you do not know what to open, ask a brief clarification. Do not claim it is open until an `open` command succeeds.";
+	if (requestAsksToOpenLocalThing(userText) && !completedActions.has("open")) {
+		return "ACTION COMPLETION CHECK FAILED: The user asked you to open something on macOS, but no successful bash command using the system `open` command has run. Discovery commands like `ls`, `find`, `test`, or `pwd` do not open anything. If you know the path, URL, app, PR, or link, return a bash tool call that runs `open` with proper shell quoting. If you do not know what to open, ask a brief clarification. Do not claim it is open until an `open` command succeeds.";
+	}
+	if (requestAsksToSchedule(userText) && !completedActions.has("schedule")) {
+		return "ACTION COMPLETION CHECK FAILED: The user asked for a future reminder or work review, but schedule_job has not succeeded. Convert the user's natural time expression to an ISO runAt timestamp using the supplied current date and return a schedule_job tool call. Do not claim the reminder is scheduled before that tool succeeds or requests confirmation.";
+	}
+	if (requestAsksToCreateGoal(userText) && !completedActions.has("goal_create")) {
+		return "ACTION COMPLETION CHECK FAILED: The user asked to retain an objective as a goal, but create_goal has not succeeded. Return a create_goal tool call based on the user's natural wording. Do not claim the goal was saved until the tool succeeds.";
+	}
+	return null;
+}
+
+function requestAsksToSchedule(userText: string): boolean {
+	return /\b(?:remind me|give me (?:a )?(?:reminder|nudge)|set (?:a )?reminder|schedule (?:a )?(?:reminder|work review)|review my work (?:in|at|on))\b/i.test(userText);
+}
+
+function requestAsksToCreateGoal(userText: string): boolean {
+	return /\b(?:remember|save|track|keep)\b[^.!?]{0,80}\b(?:as )?(?:a |an )?(?:goal|objective)\b|\b(?:add|create|set)\b[^.!?]{0,30}\bgoal\b/i.test(userText);
 }
 
 function applyCompletionGuard(userText: string, speech: string, displayText: string, completedActions: ReadonlySet<string>): { speech: string; displayText: string } {
 	if (!missingActionCompletionCorrection(userText, speech, displayText, completedActions)) return { speech, displayText };
+	if (requestAsksToOpenLocalThing(userText)) {
+		return {
+			speech: "I have not opened it yet, sir. I verified or discussed it, but no open command succeeded.",
+			displayText: "Action completion guard: the request asked to open something, but no successful macOS `open` command was recorded.",
+		};
+	}
 	return {
-		speech: "I have not opened it yet, sir. I verified or discussed it, but no open command succeeded.",
-		displayText: "Action completion guard: the request asked to open something, but no successful macOS `open` command was recorded.",
+		speech: "I have not completed that action yet, sir.",
+		displayText: "Action completion guard: the requested durable goal or schedule action did not successfully execute.",
 	};
 }
 
@@ -1045,6 +1135,8 @@ function createSpokenConfirmationPrompt(toolCall: AlfredToolCall, _exactPreview:
 			return `Shall I ${toolCall.mode === "send" ? "send" : "draft"} that message to ${toolCall.tabHint ?? toolCall.surfaceRef ?? "that cmux tab"}, sir?${riskNote}`;
 		case "start_session_monitor":
 			return `Shall I start monitoring ${toolCall.tabHint ?? toolCall.surfaceRef ?? "that cmux tab"}${toolCall.replyMode === "send" ? " and send replies autonomously" : " and draft replies"}, sir?${riskNote}`;
+		case "schedule_job":
+			return `Shall I schedule ${toolCall.kind === "work_review" ? "a work review" : "that reminder"} for ${new Date(toolCall.runAt).toLocaleString()}, sir?`;
 		default:
 			return risk === "destructive" ? `Shall I run this high risk action, sir?${riskNote}` : `Shall I do this, sir?`;
 	}
@@ -1079,6 +1171,16 @@ function makeToolResult(toolCall: AlfredToolCall, toolCallId: string, success: b
 		failure: structuredFailure,
 		safety: { risk, confirmation },
 	};
+}
+
+function unavailableToolResult(toolCall: AlfredToolCall, toolCallId: string, risk: ToolRiskLevel, component: string): ToolResult {
+	const message = `${component} is not available in this Alfred process.`;
+	return makeToolResult(toolCall, toolCallId, false, message, undefined, risk, false, "none", failure("execute", "execution.internal_error", component, message, false));
+}
+
+function failedLocalToolResult(toolCall: AlfredToolCall, toolCallId: string, risk: ToolRiskLevel, cause: unknown): ToolResult {
+	const message = cause instanceof Error ? cause.message : String(cause);
+	return makeToolResult(toolCall, toolCallId, false, message, undefined, risk, false, "none", failure("execute", "execution.internal_error", toolCall.tool, message, false));
 }
 
 function failure(stage: FailureStage, code: FailureCode, component: string, message: string, retryable: boolean, details: Partial<Pick<StructuredFailure, "timedOut" | "rateLimited" | "httpStatus" | "configKeysMissing">> = {}): StructuredFailure {

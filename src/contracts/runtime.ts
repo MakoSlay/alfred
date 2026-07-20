@@ -240,6 +240,8 @@ export interface AlfredLoopSummary {
 	status: "running" | "waiting" | "needs_user" | "done" | "stopped" | "failed";
 	turns: number;
 	maxTurns: number;
+	/** Whether this loop may send replies without creating a draft. */
+	autonomousSend?: boolean;
 	startedAt: IsoTimestamp;
 	lastActivityAt?: IsoTimestamp;
 	observeMode?: "screen" | "session-current" | "session-file" | "adapter";

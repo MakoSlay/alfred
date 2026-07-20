@@ -499,7 +499,9 @@ function resolveSurface(
 	| { kind: "missing"; message: string; candidates: SessionSurfaceCandidate[] } {
 	if (toolCall.surfaceRef) {
 		const known = surfaces.find((surface) => surface.ref === toolCall.surfaceRef);
-		return { kind: "resolved", surface: known ?? { ref: toolCall.surfaceRef, title: toolCall.surfaceRef } };
+		return known
+			? { kind: "resolved", surface: known }
+			: { kind: "missing", message: `Surface ref ${toolCall.surfaceRef} is not currently visible. Visible tabs: ${formatSurfaceCandidates(surfaces)}`, candidates: surfaces };
 	}
 	// When neither surfaceRef nor tabHint is provided, this branch is unreachable from
 	// inspectSession (gated by isWorkspaceOnly), but remains as a defensive fallback.

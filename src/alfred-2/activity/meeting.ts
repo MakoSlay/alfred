@@ -19,14 +19,32 @@ export async function probeZoomMeetingState(now = new Date()): Promise<MeetingPr
 	if (result.exitCode === 1 || !result.stdout.trim()) {
 		return { state: "not_in_meeting", evidence: ["no Zoom meeting process evidence"], confidence: "low", sampledAt: now.toISOString() };
 	}
-	const evidence = result.stdout.trim().split(/\r?\n/).slice(0, 5);
-	const hasMeetingHost = /CptHost|zoom\.us/i.test(result.stdout);
+	return classifyZoomProcessOutput(result.stdout, now);
+}
+
+/**
+ * A running Zoom app is not evidence of an active meeting. `pgrep -f` also
+ * returns ZoomCefHelper processes because their paths and arguments contain
+ * `zoom.us`, so only the dedicated CptHost executable is treated as meeting
+ * evidence. Microphone activity independently suppresses speech while in use.
+ */
+export function classifyZoomProcessOutput(output: string, now = new Date()): MeetingProbeResult {
+	const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+	const meetingHostLines = lines.filter(isZoomMeetingHostProcess);
+	const hasMeetingHost = meetingHostLines.length > 0;
 	return {
 		state: hasMeetingHost ? "maybe_in_meeting" : "not_in_meeting",
-		evidence: hasMeetingHost ? evidence : ["Zoom process found without meeting-host evidence"],
+		evidence: hasMeetingHost
+			? meetingHostLines.slice(0, 5)
+			: ["Zoom is running without a dedicated meeting-host process"],
 		confidence: hasMeetingHost ? "medium" : "low",
 		sampledAt: now.toISOString(),
 	};
+}
+
+function isZoomMeetingHostProcess(line: string): boolean {
+	const command = line.replace(/^\d+\s+/, "");
+	return /(?:^|\/)CptHost(?:\s|$)/i.test(command);
 }
 
 export async function probeSlackHuddleState(now = new Date()): Promise<MeetingProbeResult> {

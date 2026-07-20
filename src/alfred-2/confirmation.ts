@@ -70,6 +70,20 @@ export function createConfirmationPreview(toolCall: AlfredToolCall, cwd?: string
 			return `[LOG_BREAK] Reset active work timer and record break`;
 		case "wellness_status":
 			return `[WELLNESS_STATUS]`;
+		case "list_goals":
+			return `[LIST_GOALS] ${toolCall.status ?? "active"}`;
+		case "create_goal":
+			return `[CREATE_GOAL] ${toolCall.title}${toolCall.notes ? `\nNotes: ${toolCall.notes}` : ""}`;
+		case "update_goal":
+			return `[UPDATE_GOAL] ${toolCall.goalIdOrTitle}\nChanges: ${JSON.stringify({ title: toolCall.title, notes: toolCall.notes, status: toolCall.status })}`;
+		case "list_scheduled_jobs":
+			return `[LIST_SCHEDULED_JOBS] ${toolCall.enabledOnly === false ? "all" : "enabled"}`;
+		case "schedule_job":
+			return `[SCHEDULE_JOB]\nKind: ${toolCall.kind}\nAt: ${toolCall.runAt}\nRecurrence: ${toolCall.recurrenceMinutes ? `${toolCall.recurrenceMinutes} minutes` : "once"}\nMessage: ${toolCall.title}${toolCall.kind === "work_review" ? `\nTarget: ${toolCall.workspaceRef} / ${toolCall.surfaceRef}\nDisclosure: recent terminal text from this exact target will be sent to the configured LLM after redaction` : ""}`;
+		case "cancel_scheduled_job":
+			return `[CANCEL_SCHEDULED_JOB] ${toolCall.jobId}`;
+		case "review_current_work":
+			return `[REVIEW_CURRENT_WORK]`;
 	}
 }
 

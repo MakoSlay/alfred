@@ -23,6 +23,7 @@ export function AppShell({ page, onPageChange, state, notice, onRefresh, childre
   children: ReactNode;
 }) {
   const pending = state?.pendingConfirmations ?? 0;
+  const autonomousSendMonitors = state?.sessionMonitors?.filter((monitor) => monitor.replyMode === "send" && !["done", "failed", "stopped"].includes(monitor.status)).length ?? 0;
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -59,9 +60,14 @@ export function AppShell({ page, onPageChange, state, notice, onRefresh, childre
             <h1>{NAV_ITEMS.find((item) => item.id === page)?.label}</h1>
           </div>
           <div className="topbar__status">
-            <StatusPill tone={pending ? "warn" : state?.autoConfirm ? "good" : "quiet"}>
-              {pending ? `${pending} approval${pending === 1 ? "" : "s"}` : state?.autoConfirm ? "Autonomous" : "Guarded"}
+            <StatusPill tone={state?.autoConfirm ? "good" : "quiet"}>
+              {state?.autoConfirm ? "Routine mutations auto-approved" : "Confirm routine mutations"}
             </StatusPill>
+            {pending ? <StatusPill tone="warn">{pending} approval{pending === 1 ? "" : "s"}</StatusPill> : null}
+            {autonomousSendMonitors > 0
+              ? <StatusPill tone="warn">{autonomousSendMonitors} autonomous-send monitor{autonomousSendMonitors === 1 ? "" : "s"}</StatusPill>
+              : null}
+            {state?.workAdvisor?.autonomousEnabled ? <StatusPill tone="warn">Work observation: {state.workAdvisor.workspace}</StatusPill> : null}
             <StatusPill tone={state?.muted ? "bad" : "good"}>{state?.muted ? "Muted" : "Voice online"}</StatusPill>
             {state ? <code className="session-chip" title={state.sessionId}>{state.sessionId}</code> : null}
             <button className="button button--quiet" onClick={onRefresh} type="button">Refresh</button>

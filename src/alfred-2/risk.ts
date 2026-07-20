@@ -3,7 +3,15 @@ import type { AlfredToolCall, ToolRiskLevel, ConfirmationRequirement } from "./t
 export interface RiskClassification {
 	risk: ToolRiskLevel;
 	confirmation: ConfirmationRequirement;
+	/** Exact opt-in: absent/false means session auto-confirm may not bypass it. */
+	autoConfirmEligible?: boolean;
 	blockedReason?: string;
+}
+
+export function effectiveConfirmationRequirement(classification: RiskClassification, autoConfirm: boolean): ConfirmationRequirement {
+	return autoConfirm && classification.confirmation === "confirm" && classification.autoConfirmEligible === true
+		? "none"
+		: classification.confirmation;
 }
 
 // ── Read-only no-confirmation commands (operational-decisions.md) ──
@@ -150,8 +158,18 @@ export function classifyToolRisk(toolCall: AlfredToolCall): RiskClassification {
 		case "log_break":
 			return { risk: "mutation", confirmation: "none" };
 		case "wellness_status":
+		case "list_goals":
+		case "list_scheduled_jobs":
+		case "review_current_work":
 			return { risk: "read", confirmation: "none" };
+		case "create_goal":
+		case "update_goal":
+		case "cancel_scheduled_job":
+			return { risk: "mutation", confirmation: "none" };
+		case "schedule_job":
+			return { risk: "mutation", confirmation: "confirm" };
 	}
+	return { risk: "destructive", confirmation: "blocked", blockedReason: "Unknown tool calls fail closed." };
 }
 
 function classifyBashRisk(toolCall: { tool: "bash"; command: string; cwd?: string; path?: string }): RiskClassification {
@@ -168,17 +186,17 @@ function classifyBashRisk(toolCall: { tool: "bash"; command: string; cwd?: strin
 
 	// Git mutations
 	if (GIT_MUTATION_PATTERNS.some((p) => p.test(command))) {
-		return { risk: "mutation", confirmation: "confirm" };
+		return { risk: "mutation", confirmation: "confirm", autoConfirmEligible: true };
 	}
 
 	// Package mutations
 	if (PACKAGE_MUTATION_PATTERNS.some((p) => p.test(command))) {
-		return { risk: "mutation", confirmation: "confirm" };
+		return { risk: "mutation", confirmation: "confirm", autoConfirmEligible: true };
 	}
 
 	// General mutation patterns (mv, cp, mkdir, redirects)
 	if (GENERAL_MUTATION_BASH_PATTERNS.some((p) => p.test(command))) {
-		return { risk: "mutation", confirmation: "confirm" };
+		return { risk: "mutation", confirmation: "confirm", autoConfirmEligible: true };
 	}
 
 	// Read-only diagnostics — no confirmation
@@ -199,15 +217,15 @@ function classifyReadFileRisk(toolCall: { tool: string; path: string }): RiskCla
 function classifyWriteFileRisk(toolCall: { tool: string; path: string }): RiskClassification {
 	const pathBlock = checkBlockedPaths(toolCall);
 	if (pathBlock) return pathBlock;
-	// write_file always overwrites — confirmation required
-	return { risk: "mutation", confirmation: "confirm" };
+	// write_file is a routine local edit and may use the session-scoped grant.
+	return { risk: "mutation", confirmation: "confirm", autoConfirmEligible: true };
 }
 
 function classifyEditFileRisk(toolCall: { tool: string; path: string }): RiskClassification {
 	const pathBlock = checkBlockedPaths(toolCall);
 	if (pathBlock) return pathBlock;
-	// All edit_file calls require confirmation
-	return { risk: "mutation", confirmation: "confirm" };
+	// edit_file is a routine local edit and may use the session-scoped grant.
+	return { risk: "mutation", confirmation: "confirm", autoConfirmEligible: true };
 }
 
 function checkBlockedPaths(toolCall: { cwd?: string; path?: string; command?: string }): RiskClassification | null {

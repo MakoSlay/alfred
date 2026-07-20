@@ -1,5 +1,6 @@
 import { ALFRED_TOOL_NAMES, isRegisteredToolName, type AlfredFinalSpeech, type AlfredToolCall, type AlfredToolName, type ToolRiskLevel } from "./tool-types.ts";
 import type { FailureCode } from "./capabilities/failure-codes.ts";
+import { MAX_RECURRENCE_MINUTES, MIN_RECURRENCE_MINUTES, parseScheduledTimestamp, validRecurrenceMinutes, validWorkReviewTargetRefs } from "./goals.ts";
 
 export interface ParserDiagnostics {
 	rawLength: number;
@@ -312,6 +313,43 @@ function validateToolCall(obj: Record<string, unknown>, tool: AlfredToolName): V
 			error = rejectExtra([]);
 			break;
 		case "wellness_status":
+			error = rejectExtra([]);
+			break;
+		case "list_goals":
+			error = rejectExtra(["status"]);
+			if (!error && obj.status !== undefined && !["active", "completed", "all"].includes(String(obj.status))) error = "status must be active, completed, or all";
+			break;
+		case "create_goal":
+			error = rejectExtra(["title", "notes"]);
+			if (!error) error = requireString("title");
+			if (!error && obj.notes !== undefined && typeof obj.notes !== "string") error = "notes must be a string when provided";
+			break;
+		case "update_goal":
+			error = rejectExtra(["goalIdOrTitle", "title", "notes", "status"]);
+			if (!error) error = requireString("goalIdOrTitle");
+			if (!error && obj.title !== undefined && typeof obj.title !== "string") error = "title must be a string when provided";
+			if (!error && obj.notes !== undefined && typeof obj.notes !== "string") error = "notes must be a string when provided";
+			if (!error && obj.status !== undefined && !["active", "completed"].includes(String(obj.status))) error = "status must be active or completed when provided";
+			if (!error && obj.title === undefined && obj.notes === undefined && obj.status === undefined) error = "update_goal requires title, notes, or status";
+			break;
+		case "list_scheduled_jobs":
+			error = rejectExtra(["enabledOnly"]);
+			if (!error && obj.enabledOnly !== undefined && typeof obj.enabledOnly !== "boolean") error = "enabledOnly must be a boolean when provided";
+			break;
+		case "schedule_job":
+			error = rejectExtra(["kind", "title", "runAt", "recurrenceMinutes", "surfaceRef"]);
+			if (!error && !["reminder", "work_review"].includes(String(obj.kind))) error = "kind must be reminder or work_review";
+			if (!error) error = requireString("title");
+			if (!error) error = requireString("runAt");
+			if (!error && !parseScheduledTimestamp(String(obj.runAt))) error = "runAt must be an RFC3339 timestamp with an explicit timezone";
+			if (!error && obj.recurrenceMinutes !== undefined && (typeof obj.recurrenceMinutes !== "number" || !validRecurrenceMinutes(obj.recurrenceMinutes))) error = `recurrenceMinutes must be an integer of at least ${MIN_RECURRENCE_MINUTES} and at most ${MAX_RECURRENCE_MINUTES}`;
+			if (!error && obj.kind === "work_review" && !validWorkReviewTargetRefs(typeof obj.workspaceRef === "string" ? obj.workspaceRef : undefined, typeof obj.surfaceRef === "string" ? obj.surfaceRef : undefined)) error = "work_review requires exact workspaceRef and surfaceRef values";
+			break;
+		case "cancel_scheduled_job":
+			error = rejectExtra(["jobId"]);
+			if (!error) error = requireString("jobId");
+			break;
+		case "review_current_work":
 			error = rejectExtra([]);
 			break;
 	}

@@ -226,8 +226,9 @@ pre { max-width: 100%; white-space: pre-wrap; word-break: break-word; margin: 8p
     pill.className = 'pill';
     pill.textContent = activeLoop.status;
     const goal = line('meta', 'Goal: ' + safeRedactedText(activeLoop.goal));
+    const replies = line('meta', 'Replies: ' + (activeLoop.autonomousSend ? 'autonomous send' : 'draft + confirmation'));
     const meta = line('meta', 'Turns ' + activeLoop.turns + '/' + activeLoop.maxTurns + ' · started ' + activeLoop.startedAt + (activeLoop.lastActivityAt ? ' · last activity ' + activeLoop.lastActivityAt : '') + (activeLoop.observeMode ? ' · observe ' + activeLoop.observeMode : ''));
-    loop.append(title, pill, goal, meta);
+    loop.append(title, pill, goal, replies, meta);
   }
 
   function renderSurfaces(targets) {

@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   addFact: vi.fn(),
   deleteFact: vi.fn(),
   ask: vi.fn(),
+  updateAutonomy: vi.fn(),
   restoreUndo: vi.fn(),
   clearUndo: vi.fn(),
   updateTts: vi.fn(),
@@ -113,6 +114,38 @@ beforeEach(() => {
   localStorage.setItem("alfred2-page", "memory");
   vi.clearAllMocks();
   api.tools.mockResolvedValue({ ok: true, count: 0, names: [], contracts: [] });
+});
+
+describe("Autonomy controls", () => {
+  it("uses the typed session posture API and keeps approvals and monitor authority visible", async () => {
+    const user = userEvent.setup();
+    const initial = state([]);
+    initial.pendingConfirmations = 2;
+    initial.sessionMonitors = [{
+      id: "monitor-1",
+      workspaceRef: "workspace:1",
+      workspaceName: "Main",
+      surfaceRef: "surface:1",
+      surfaceTitle: "Pi chat",
+      status: "running",
+      replyMode: "send",
+      turns: 1,
+      maxTurns: 6,
+      startedAt: timestamp,
+      lastActivityAt: timestamp,
+    }];
+    api.state.mockResolvedValue(initial);
+    api.updateAutonomy.mockResolvedValue({ ok: true, autoConfirm: true, scope: "session" });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /Safety/ }));
+    expect(screen.getByText("2 approvals")).toBeVisible();
+    expect(screen.getByText("1 autonomous-send monitor")).toBeVisible();
+    expect(screen.getByText("Autonomous send")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Auto-approve routine mutations" }));
+    expect(api.updateAutonomy).toHaveBeenCalledWith(true);
+    expect(api.ask).not.toHaveBeenCalled();
+  });
 });
 
 describe("App hydration ordering", () => {

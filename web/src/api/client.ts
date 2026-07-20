@@ -1,5 +1,6 @@
 import type {
   AskResponse,
+  AutonomySettingsResponse,
   DashboardState,
   KnowledgeImportRequest,
   KnowledgeSearchResponse,
@@ -37,6 +38,7 @@ function jsonInit(method: string, body?: unknown): RequestInit {
 
 export const alfredApi = {
   state: () => request<DashboardState>("/dashboard/state"),
+  updateAutonomy: (autoConfirm: boolean) => request<AutonomySettingsResponse>("/api/settings/autonomy", jsonInit("PUT", { autoConfirm })),
   tools: () => request<ToolsResponse>("/tools"),
   ask: (text: string, requestId: string = crypto.randomUUID(), options: {
     signal?: AbortSignal;

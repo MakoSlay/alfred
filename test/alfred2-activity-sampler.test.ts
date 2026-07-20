@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { IDLE_THRESHOLD_S, SAMPLE_INTERVAL_MS, resetActivitySamplerForTests, tickActivitySampler } from "../src/alfred-2/activity/sampler.ts";
 import { parseHidIdleSeconds } from "../src/alfred-2/activity/idle.ts";
-import { combineMeetingProbeResults } from "../src/alfred-2/activity/meeting.ts";
+import { classifyZoomProcessOutput, combineMeetingProbeResults } from "../src/alfred-2/activity/meeting.ts";
 import { parseMacAudioEngineMicrophoneState } from "../src/alfred-2/activity/microphone.ts";
 import type { IdleProbe, MeetingProbe, MeetingState, MicrophoneProbe, MicrophoneState } from "../src/alfred-2/activity/types.ts";
 
@@ -77,6 +77,22 @@ test("combined meeting probes fail closed when any probe is unknown", () => {
 		{ state: "not_in_meeting", evidence: ["no slack huddle evidence"], confidence: "low", sampledAt: "2026-07-02T12:00:00.000Z" },
 	], new Date("2026-07-02T12:00:00.000Z"));
 	assert.equal(combined.state, "unknown");
+});
+
+test("running Zoom and its helper processes do not imply an active meeting", () => {
+	const result = classifyZoomProcessOutput(`
+22146 /Users/me/Library/Application Support/zoom.us/CefPlugin/ZoomCefHelper.app/Contents/MacOS/ZoomCefHelper --main-bundle-path=/Applications/zoom.us.app
+44756 /Applications/zoom.us.app/Contents/MacOS/zoom.us
+44837 /Applications/zoom.us.app/Contents/Frameworks/caphost.app/Contents/MacOS/caphost -pid 44756
+`);
+	assert.equal(result.state, "not_in_meeting");
+	assert.match(result.evidence[0] ?? "", /without a dedicated meeting-host process/);
+});
+
+test("Zoom CptHost process is treated as possible meeting evidence", () => {
+	const result = classifyZoomProcessOutput("123 /Applications/zoom.us.app/Contents/Frameworks/CptHost.app/Contents/MacOS/CptHost -pid 100");
+	assert.equal(result.state, "maybe_in_meeting");
+	assert.equal(result.confidence, "medium");
 });
 
 test("microphone audio engine parser detects active input engines", () => {

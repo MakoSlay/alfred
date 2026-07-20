@@ -180,12 +180,19 @@ export class WellnessWatcher {
 	}
 }
 
-export async function executeDelivery(event: ProactiveEvent, decision: ProactiveDecision, delivery: ProactiveDeliveryFunctions): Promise<boolean> {
-	let success = false;
+export interface DeliveryOutcome {
+	delivered: boolean;
+	notificationDelivered: boolean;
+	speechDelivered: boolean;
+}
+
+export async function executeDeliveryWithOutcome(event: ProactiveEvent, decision: ProactiveDecision, delivery: ProactiveDeliveryFunctions): Promise<DeliveryOutcome> {
+	let notificationDelivered = false;
+	let speechDelivered = false;
 	if (decision.deliveries.includes("notification")) {
 		try {
 			await delivery.notify(event.title, event.message);
-			success = true;
+			notificationDelivered = true;
 		} catch {
 			// Keep pending if every interruptive channel fails.
 		}
@@ -193,12 +200,16 @@ export async function executeDelivery(event: ProactiveEvent, decision: Proactive
 	if (decision.deliveries.includes("speech") && !delivery.isMuted()) {
 		try {
 			const spoken = await delivery.speak(event.message);
-			if (spoken && !delivery.isMuted()) success = true;
+			if (spoken && !delivery.isMuted()) speechDelivered = true;
 		} catch {
 			// Keep pending if every interruptive channel fails.
 		}
 	}
-	return success;
+	return { delivered: notificationDelivered || speechDelivered, notificationDelivered, speechDelivered };
+}
+
+export async function executeDelivery(event: ProactiveEvent, decision: ProactiveDecision, delivery: ProactiveDeliveryFunctions): Promise<boolean> {
+	return (await executeDeliveryWithOutcome(event, decision, delivery)).delivered;
 }
 
 export function loadWellnessState(path = DEFAULT_STATE_PATH): WellnessPersistentState {

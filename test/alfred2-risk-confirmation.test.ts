@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { classifyToolRisk, isDestructiveBash, isGitMutation, isPackageMutation } from "../src/alfred-2/risk.ts";
+import { classifyToolRisk, effectiveConfirmationRequirement, isDestructiveBash, isGitMutation, isPackageMutation } from "../src/alfred-2/risk.ts";
 import { createConfirmationPreview, hashPayload, PendingConfirmationStore } from "../src/alfred-2/confirmation.ts";
 import type { BashToolCall, EditFileToolCall, WriteFileToolCall, ReadFileToolCall, PendingConfirmation } from "../src/alfred-2/tool-types.ts";
 
@@ -130,6 +130,21 @@ test("session monitor tools classify draft start as confirm and autonomous send 
 	assert.deepEqual(classifyToolRisk({ tool: "session_monitor_status" }), { risk: "read", confirmation: "none" });
 	assert.deepEqual(classifyToolRisk({ tool: "stop_session_monitor" }), { risk: "mutation", confirmation: "none" });
 	assert.match(createConfirmationPreview({ tool: "start_session_monitor", workspaceRef: "workspace:11", surfaceRef: "surface:29", goal: "watch", replyMode: "draft" }), /START_SESSION_MONITOR/);
+});
+
+test("goal and schedule tools use bounded confirmation policy", () => {
+	assert.deepEqual(classifyToolRisk({ tool: "create_goal", title: "Ship Work Radar" }), { risk: "mutation", confirmation: "none" });
+	assert.deepEqual(classifyToolRisk({ tool: "update_goal", goalIdOrTitle: "Ship Work Radar", status: "completed" }), { risk: "mutation", confirmation: "none" });
+	assert.deepEqual(classifyToolRisk({ tool: "schedule_job", kind: "reminder", title: "Check CI", runAt: "2026-07-16T15:00:00Z" }), { risk: "mutation", confirmation: "confirm" });
+	assert.deepEqual(classifyToolRisk({ tool: "review_current_work" }), { risk: "read", confirmation: "none" });
+});
+
+test("auto-confirm eligibility is explicit and fail-closed", () => {
+	assert.equal(effectiveConfirmationRequirement(classifyToolRisk({ tool: "edit_file", path: "a.ts", oldText: "a", newText: "b" }), true), "none");
+	assert.equal(effectiveConfirmationRequirement(classifyToolRisk({ tool: "bash", command: "git add a.ts" }), true), "none");
+	assert.equal(effectiveConfirmationRequirement(classifyToolRisk({ tool: "schedule_job", kind: "reminder", title: "check", runAt: "2026-07-16T13:00:00Z" }), true), "confirm");
+	assert.equal(effectiveConfirmationRequirement(classifyToolRisk({ tool: "send_session_message", workspaceName: "Main", tabHint: "Pi", text: "go", mode: "send" }), true), "confirm");
+	assert.equal(effectiveConfirmationRequirement({ risk: "mutation", confirmation: "confirm" }, true), "confirm");
 });
 
 test("general mutation bash (mv, cp, mkdir) classified as mutation/confirm", () => {

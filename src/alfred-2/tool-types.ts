@@ -28,6 +28,13 @@ export const ALFRED_TOOL_NAMES = [
 	"docs_read",
 	"log_break",
 	"wellness_status",
+	"list_goals",
+	"create_goal",
+	"update_goal",
+	"list_scheduled_jobs",
+	"schedule_job",
+	"cancel_scheduled_job",
+	"review_current_work",
 ] as const;
 
 export type AlfredToolName = typeof ALFRED_TOOL_NAMES[number];
@@ -59,6 +66,13 @@ export const ALFRED_TOOL_PROMPT_SNIPPETS: Record<AlfredToolName, string> = {
 	docs_read: 'docs_read: {"tool":"docs_read","documentId":"doc id from docs_search"}',
 	log_break: 'log_break: {"tool":"log_break"}',
 	wellness_status: 'wellness_status: {"tool":"wellness_status"}',
+	list_goals: 'list_goals: {"tool":"list_goals","status":"active|completed|all"} — use for natural-language questions about goals',
+	create_goal: 'create_goal: {"tool":"create_goal","title":"goal","notes":"optional context"} — use when the user naturally asks to remember or track an objective',
+	update_goal: 'update_goal: {"tool":"update_goal","goalIdOrTitle":"ID or exact title","title":"optional new title","notes":"optional notes","status":"active|completed"} — update or complete a goal',
+	list_scheduled_jobs: 'list_scheduled_jobs: {"tool":"list_scheduled_jobs","enabledOnly":true}',
+	schedule_job: 'schedule_job: {"tool":"schedule_job","kind":"reminder|work_review","title":"what to remind/review","runAt":"RFC3339 timestamp with timezone","recurrenceMinutes":15,"workspaceRef":"required for work_review","surfaceRef":"required for work_review"} — recurrence must be 15..525600 minutes; confirmation required',
+	cancel_scheduled_job: 'cancel_scheduled_job: {"tool":"cancel_scheduled_job","jobId":"job ID"}',
+	review_current_work: 'review_current_work: {"tool":"review_current_work"} — inspect the exact focused cmux work surface and provide evidence-grounded status/advice',
 };
 
 export function formatAlfredToolPrompt(names: readonly AlfredToolName[] = ALFRED_TOOL_NAMES): string {
@@ -348,6 +362,62 @@ export interface LogBreakToolCall {
 	toolCallId?: string;
 }
 
+export interface ListGoalsToolCall {
+	tool: "list_goals";
+	status?: "active" | "completed" | "all";
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface CreateGoalToolCall {
+	tool: "create_goal";
+	title: string;
+	notes?: string;
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface UpdateGoalToolCall {
+	tool: "update_goal";
+	goalIdOrTitle: string;
+	title?: string;
+	notes?: string;
+	status?: "active" | "completed";
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface ListScheduledJobsToolCall {
+	tool: "list_scheduled_jobs";
+	enabledOnly?: boolean;
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface ScheduleJobToolCall {
+	tool: "schedule_job";
+	kind: "reminder" | "work_review";
+	title: string;
+	runAt: string;
+	recurrenceMinutes?: number;
+	workspaceRef?: string;
+	surfaceRef?: string;
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface CancelScheduledJobToolCall {
+	tool: "cancel_scheduled_job";
+	jobId: string;
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface ReviewCurrentWorkToolCall {
+	tool: "review_current_work";
+	requestId?: string;
+	toolCallId?: string;
+}
 
 export type AlfredToolCall =
 	| BashToolCall
@@ -375,7 +445,14 @@ export type AlfredToolCall =
 	| DocsSearchToolCall
 	| DocsReadToolCall
 	| LogBreakToolCall
-	| WellnessStatusToolCall;
+	| WellnessStatusToolCall
+	| ListGoalsToolCall
+	| CreateGoalToolCall
+	| UpdateGoalToolCall
+	| ListScheduledJobsToolCall
+	| ScheduleJobToolCall
+	| CancelScheduledJobToolCall
+	| ReviewCurrentWorkToolCall;
 
 export interface AlfredFinalSpeech {
 	speech: string;

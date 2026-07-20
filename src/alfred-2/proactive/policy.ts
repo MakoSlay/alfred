@@ -8,6 +8,7 @@ import type {
 
 export const WELLNESS_COOLDOWN_MS = 90 * 60 * 1000;
 export const STUCK_WORK_COOLDOWN_MS = 20 * 60 * 1000;
+export const WORK_ADVICE_COOLDOWN_MS = 60 * 60 * 1000;
 export const SLACK_ATTENTION_COOLDOWN_MS = 0;
 export const TODO_COOLDOWN_MS = 60 * 60 * 1000;
 export const PR_NOTIFICATION_COOLDOWN_MS = 20 * 60 * 1000;
@@ -21,6 +22,8 @@ export function cooldownWindowForKind(kind: ProactiveEvent["kind"]): number {
 			return WELLNESS_COOLDOWN_MS;
 		case "stuck_work":
 			return STUCK_WORK_COOLDOWN_MS;
+		case "work_advice":
+			return WORK_ADVICE_COOLDOWN_MS;
 		case "slack_attention":
 			return SLACK_ATTENTION_COOLDOWN_MS;
 		case "todo":
@@ -61,7 +64,9 @@ export function decideProactiveDelivery(
 
 	const deliveries = new Set<ProactiveDelivery>(base);
 	const canNotify = notificationAllowedByPriority(event);
-	const canSpeech = runtime.meetingState === "not_in_meeting";
+	const workAwarenessEvent = event.kind === "stuck_work" || event.kind === "work_advice";
+	const microphoneAllowsSpeech = runtime.microphoneState !== "active" && (!workAwarenessEvent || runtime.microphoneState === "inactive");
+	const canSpeech = runtime.meetingState === "not_in_meeting" && microphoneAllowsSpeech;
 
 	if (runtime.meetingState === "unknown") {
 		if (unknownMeetingNotificationAllowed(event)) deliveries.add("notification");
@@ -105,7 +110,7 @@ function isImportantOrUrgent(event: ProactiveEvent): boolean {
 
 function unknownMeetingNotificationAllowed(event: ProactiveEvent): boolean {
 	if (event.kind === "wellness") return false;
-	if (event.kind === "stuck_work") return isImportantOrUrgent(event);
+	if (event.kind === "stuck_work" || event.kind === "work_advice") return isImportantOrUrgent(event);
 	if (event.kind === "slack_attention") return event.priority === "urgent";
 	return event.priority === "important" || event.priority === "urgent";
 }

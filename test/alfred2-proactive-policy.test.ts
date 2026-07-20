@@ -61,12 +61,20 @@ test("speech is suppressed for uncertain or active meeting states", () => {
 	}
 });
 
-test("active microphone does not cancel policy speech delivery because TTS pauses at runtime", () => {
+test("active microphone suppresses proactive speech while preserving notifications", () => {
 	const store = new ProactiveEventStore();
 	const decision = store.decide(event({ priority: "important" }), runtime({ microphoneState: "active" }));
 	assert.ok(decision.deliveries.includes("notification"));
-	assert.ok(decision.deliveries.includes("speech"));
-	assert.equal(decision.suppressReason, undefined);
+	assert.ok(!decision.deliveries.includes("speech"));
+});
+
+test("work-awareness speech requires a known inactive microphone", () => {
+	for (const microphoneState of [undefined, "unknown", "active"] as const) {
+		const store = new ProactiveEventStore();
+		const decision = store.decide(event({ kind: "stuck_work", priority: "important" }), runtime({ microphoneState }));
+		assert.ok(decision.deliveries.includes("notification"));
+		assert.ok(!decision.deliveries.includes("speech"));
+	}
 });
 
 test("Slack speech requires urgent missed likely-forgotten actionable metadata", () => {

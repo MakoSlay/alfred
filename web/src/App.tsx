@@ -185,7 +185,10 @@ export default function App() {
 
   async function toggleAutoConfirm() {
     if (!state) return;
-    await ask(state.autoConfirm ? "stop auto confirm" : "yes to all");
+    await runAction(async () => {
+      const result = await alfredApi.updateAutonomy(!state.autoConfirm);
+      return result.autoConfirm ? "Routine mutation auto-approval enabled for this session." : "Routine mutations require approval.";
+    });
   }
 
   async function toggleMute(minutes: number) {

@@ -55,6 +55,24 @@ test("parses session monitor management tools", () => {
 	assert.equal(assertKind(parseAlfredModelResponse('{"tool":"stop_session_monitor","monitorId":"monitor-1"}'), "tool").value.tool, "stop_session_monitor");
 });
 
+test("parses goal, schedule, and work-review tools for natural-language planning", () => {
+	assert.equal(assertKind(parseAlfredModelResponse('{"tool":"create_goal","title":"Ship Work Radar"}'), "tool").value.tool, "create_goal");
+	assert.equal(assertKind(parseAlfredModelResponse('{"tool":"update_goal","goalIdOrTitle":"Ship Work Radar","status":"completed"}'), "tool").value.tool, "update_goal");
+	assert.equal(assertKind(parseAlfredModelResponse('{"tool":"schedule_job","kind":"reminder","title":"Check CI","runAt":"2026-07-16T15:00:00Z","recurrenceMinutes":30}'), "tool").value.tool, "schedule_job");
+	assert.equal(assertKind(parseAlfredModelResponse('{"tool":"schedule_job","kind":"work_review","title":"Review this work","runAt":"2026-07-16T15:00:00Z","workspaceRef":"workspace:1","surfaceRef":"surface:1"}'), "tool").value.tool, "schedule_job");
+	assert.equal(assertKind(parseAlfredModelResponse('{"tool":"review_current_work"}'), "tool").value.tool, "review_current_work");
+});
+
+test("schedule tools reject invalid times, recurrence, and extra fields", () => {
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"schedule_job","kind":"reminder","title":"Check CI","runAt":"later"}'), "retryable_error").error, /runAt/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"schedule_job","kind":"reminder","title":"Check CI","runAt":"2026-07-16"}'), "retryable_error").error, /timezone/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"schedule_job","kind":"reminder","title":"Check CI","runAt":"2026-02-30T15:00:00Z"}'), "retryable_error").error, /runAt/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"schedule_job","kind":"reminder","title":"Check CI","runAt":"2026-07-16T15:00:00Z","recurrenceMinutes":5}'), "retryable_error").error, /at least 15/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"schedule_job","kind":"reminder","title":"Check CI","runAt":"2026-07-16T15:00:00Z","recurrenceMinutes":525601}'), "retryable_error").error, /at most 525600/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"schedule_job","kind":"work_review","title":"Review","runAt":"2026-07-16T15:00:00Z"}'), "retryable_error").error, /workspaceRef and surfaceRef/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"create_goal","title":"Goal","command":"rm -rf"}'), "retryable_error").error, /unsupported/);
+});
+
 test("parses JSON inside fenced code block", () => {
 	const result = assertKind(parseAlfredModelResponse('```json\n{"tool":"read_file","path":"package.json"}\n```'), "tool");
 	assert.equal(result.value.tool, "read_file");
