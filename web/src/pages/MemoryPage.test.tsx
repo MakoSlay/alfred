@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { removeProfileFact, upsertProfileFact } from "../App";
@@ -162,25 +162,146 @@ describe("MemoryPage", () => {
     expect(value).toHaveValue("Concise");
   });
 
-  it("deletes profile memory by stable ID and prevents duplicate submission", async () => {
+  it("deletes profile memory by stable ID, announces the result, and restores focus", async () => {
     const user = userEvent.setup();
-    let resolveDelete: (() => void) | undefined;
-    const onDelete = vi.fn(() => new Promise<void>((resolve) => { resolveDelete = resolve; }));
+    let resolveDelete: ((removed: boolean) => void) | undefined;
+    const onDelete = vi.fn(() => new Promise<boolean>((resolve) => { resolveDelete = resolve; }));
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<MemoryPage state={dashboardState()} onAdd={vi.fn()} onDelete={onDelete} />);
 
-    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await user.click(screen.getByRole("button", { name: "Delete theme" }));
     expect(onDelete).toHaveBeenCalledWith("profile-theme");
-    expect(screen.getByRole("button", { name: "Deleting…" })).toBeDisabled();
-    resolveDelete?.();
+    expect(screen.getByRole("button", { name: "Delete theme" })).toBeDisabled();
+    resolveDelete?.(true);
+    expect(await screen.findByText(/Profile memory deleted/)).toBeVisible();
+    expect(screen.getByLabelText("Filter profile facts")).toHaveFocus();
+  });
+
+  it("edits profile memory by stable ID, retains failed changes, and supports cancel", async () => {
+    const user = userEvent.setup();
+    const onUpdate = vi.fn().mockResolvedValue(false);
+    render(<MemoryPage state={dashboardState()} onAdd={vi.fn()} onDelete={vi.fn()} onUpdate={onUpdate} />);
+
+    const edit = screen.getByRole("button", { name: "Edit theme" });
+    await user.click(edit);
+    expect(screen.getByLabelText("Key")).toHaveValue("theme");
+    expect(screen.getByLabelText("Value")).toHaveValue("estate");
+    await user.clear(screen.getByLabelText("Key"));
+    await user.type(screen.getByLabelText("Key"), "visual_theme");
+    await user.clear(screen.getByLabelText("Value"));
+    await user.type(screen.getByLabelText("Value"), "cave");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(onUpdate).toHaveBeenCalledWith("profile-theme", { key: "visual_theme", value: "cave", category: "preference" }, timestamp);
+    expect(screen.getByLabelText("Key")).toHaveValue("visual_theme");
+    await user.click(screen.getByRole("button", { name: "Cancel edit" }));
+    expect(screen.getByLabelText("Key")).toHaveValue("");
+    expect(edit).toHaveFocus();
+  });
+
+  it("keeps the edit revision captured at open time across refreshes and deletion", async () => {
+    const user = userEvent.setup();
+    const onAdd = vi.fn().mockResolvedValue(true);
+    const onUpdate = vi.fn().mockResolvedValue(false);
+    const { rerender } = render(<MemoryPage state={dashboardState()} onAdd={onAdd} onDelete={vi.fn()} onUpdate={onUpdate} />);
+
+    await user.click(screen.getByRole("button", { name: "Edit theme" }));
+    await user.clear(screen.getByLabelText("Value"));
+    await user.type(screen.getByLabelText("Value"), "local edit");
+
+    const refreshed = dashboardState();
+    refreshed.memory.profile.records = [{ ...profileFact, value: "external edit", updatedAt: "2026-07-14T10:05:00.000Z" }];
+    refreshed.profileFacts = refreshed.memory.profile.records;
+    rerender(<MemoryPage state={refreshed} onAdd={onAdd} onDelete={vi.fn()} onUpdate={onUpdate} />);
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(onUpdate).toHaveBeenLastCalledWith("profile-theme", { key: "theme", value: "local edit", category: "preference" }, timestamp);
+
+    const deleted = dashboardState();
+    deleted.memory.profile = { persistent: true, count: 0, records: [] };
+    deleted.profileFacts = [];
+    rerender(<MemoryPage state={deleted} onAdd={onAdd} onDelete={vi.fn()} onUpdate={onUpdate} />);
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(onUpdate).toHaveBeenLastCalledWith("profile-theme", { key: "theme", value: "local edit", category: "preference" }, timestamp);
+    expect(onAdd).not.toHaveBeenCalled();
+  });
+
+  it("clears session summaries with explicit retention copy", async () => {
+    const user = userEvent.setup();
+    const onClearSession = vi.fn().mockResolvedValue(true);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MemoryPage state={dashboardState()} onAdd={vi.fn()} onDelete={vi.fn()} onClearSession={onClearSession} />);
+    await user.click(screen.getByRole("tab", { name: /Session/ }));
+    await user.click(screen.getByRole("button", { name: "Clear working memory" }));
+    expect(onClearSession).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/Token accounting and durable activity history remain/)).toBeVisible();
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringMatching(/activity history, handoffs/));
+  });
+
+  it("shows full provenance identifiers and exact timestamps without hover", () => {
+    render(<MemoryPage state={dashboardState()} onAdd={vi.fn()} onDelete={vi.fn()} />);
+    const profilePanel = screen.getByRole("tabpanel", { name: /Profile/ });
+    expect(within(profilePanel).getByText("profile-theme")).toBeVisible();
+    expect(screen.getByText("dashboard")).toBeVisible();
+    expect(screen.getAllByText(timestamp).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("renders grouped unified recall and ignores stale responses", async () => {
+    const user = userEvent.setup();
+    let resolveFirst: ((value: any) => void) | undefined;
+    const first = new Promise<any>((resolve) => { resolveFirst = resolve; });
+    const result = {
+      query: "amber",
+      kinds: ["profile", "session", "knowledge"] as const,
+      limit: 5,
+      total: 3,
+      groups: {
+        profile: [{ kind: "profile" as const, record: profileFact }],
+        session: [{ kind: "session" as const, record: dashboardState().memory.session.records[0]! }],
+        knowledge: [{
+          kind: "knowledge" as const,
+          record: { id: "knowledge-1", kind: "knowledge" as const, title: "Launch", sourceType: "document" as const, status: "indexed" as const, createdAt: timestamp, updatedAt: timestamp, indexedAt: timestamp, provenance: { source: "import" as const, timestamp } },
+          citation: { citationId: "knowledge:knowledge-1:chunk-1", sourceId: "knowledge-1", chunkId: "chunk-1", title: "Launch", sourceType: "document" as const, chunkIndex: 0, text: "Amber launch notes.", score: 2 },
+        }],
+      },
+      citations: [{ citationId: "knowledge:knowledge-1:chunk-1", sourceId: "knowledge-1", chunkId: "chunk-1", title: "Launch", sourceType: "document" as const, chunkIndex: 0, text: "Amber launch notes.", score: 2 }],
+    };
+    const onRecall = vi.fn().mockReturnValueOnce(first).mockResolvedValueOnce(result);
+    render(<MemoryPage state={dashboardState()} onAdd={vi.fn()} onDelete={vi.fn()} onRecall={onRecall} />);
+    const query = screen.getByLabelText("Query");
+    await user.type(query, "old");
+    await user.click(screen.getByRole("button", { name: "Recall" }));
+    await user.clear(query);
+    await user.type(query, "amber");
+    await user.click(screen.getByRole("button", { name: "Recall" }));
+    expect(await screen.findByText("Amber launch notes.")).toBeVisible();
+    expect(screen.getByText("knowledge:knowledge-1:chunk-1")).toBeVisible();
+    resolveFirst?.({ ...result, total: 0, groups: { profile: [], session: [], knowledge: [] }, citations: [] });
+    await Promise.resolve();
+    expect(screen.getByText(/Found 3 grouped memory results/)).toBeVisible();
+  });
+
+  it("invalidates pending recall when memory-kind filters change", async () => {
+    const user = userEvent.setup();
+    let resolveRecall: ((value: any) => void) | undefined;
+    const pending = new Promise<any>((resolve) => { resolveRecall = resolve; });
+    const onRecall = vi.fn().mockReturnValue(pending);
+    render(<MemoryPage state={dashboardState()} onAdd={vi.fn()} onDelete={vi.fn()} onRecall={onRecall} />);
+    await user.type(screen.getByLabelText("Query"), "amber");
+    await user.click(screen.getByRole("button", { name: "Recall" }));
+    await user.click(screen.getByLabelText("Knowledge"));
+    resolveRecall?.({ query: "amber", kinds: ["knowledge"], limit: 5, total: 1, groups: { profile: [], session: [], knowledge: [{ kind: "knowledge", record: { id: "knowledge-1", kind: "knowledge", title: "Launch", sourceType: "document", status: "indexed", createdAt: timestamp, updatedAt: timestamp, provenance: { source: "import", timestamp } }, citation: { citationId: "knowledge:1", sourceId: "knowledge-1", chunkId: "chunk-1", title: "Launch", sourceType: "document", chunkIndex: 0, text: "stale result", score: 1 } }] }, citations: [] });
+    await Promise.resolve();
+    expect(screen.queryByText("stale result")).not.toBeInTheDocument();
+    expect(screen.getByText(/Memory-kind selection changed/)).toBeVisible();
   });
 
   it("uses valid definition-list semantics for session accounting", async () => {
     const user = userEvent.setup();
-    const { container } = render(<MemoryPage state={dashboardState()} onAdd={vi.fn()} onDelete={vi.fn()} />);
+    render(<MemoryPage state={dashboardState()} onAdd={vi.fn()} onDelete={vi.fn()} />);
     await user.click(screen.getByRole("tab", { name: /Session/ }));
-    expect(container.querySelector("dl.definition-list dt")?.textContent).toBe("Context");
-    expect(container.querySelectorAll("dl.definition-list dd")).toHaveLength(2);
+    const panel = screen.getByRole("tabpanel", { name: /Session/ });
+    const accounting = panel.querySelector("dl.definition-list");
+    expect(accounting?.querySelector("dt")?.textContent).toBe("Context");
+    expect(accounting?.querySelectorAll("dd")).toHaveLength(2);
   });
 
   it("deletes and reindexes knowledge sources by stable ID", async () => {

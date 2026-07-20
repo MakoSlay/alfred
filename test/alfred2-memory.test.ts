@@ -16,6 +16,7 @@ import {
 	generateHandoffContent,
 	handoffFilePath,
 	clearMemory,
+	clearSessionTurns,
 	clearHandoffDir,
 	type ConversationTurn,
 	type SessionMemory,
@@ -133,6 +134,19 @@ test("memory clear removes all turns and resets token counters", () => {
 
 	const context = formatConversationForContext(memory);
 	assert.ok(context.includes("No previous turns"));
+});
+
+test("session turn clear preserves token and context accounting", () => {
+	const memory = createSessionMemory();
+	addTurn(memory, { userText: "retain accounting", finalSpeech: "yes", toolsUsed: [], workspaceHint: "", shortOutcome: "done" });
+	addTokens(memory, { inputTokens: 40, outputTokens: 2, totalTokens: 42, source: "provider" });
+	updateCurrentContextTokens(memory, 25);
+	assert.equal(clearSessionTurns(memory), 1);
+	assert.equal(clearSessionTurns(memory), 0);
+	assert.equal(memory.turns.length, 0);
+	assert.equal(memory.cumulativeTotalTokens, 42);
+	assert.equal(memory.currentContextTokens, 25);
+	assert.equal(memory.maxContextTokens, 25);
 });
 
 test("legacy cumulative token helpers still track usage totals", () => {

@@ -614,6 +614,8 @@ Alfred should use this before guessing when the user asks about stored docs/proj
 
 ## Phase 6 — Memory Cleanup Beyond Knowledge
 
+**Status: Phase 6A lifecycle/control parity implemented on 2026-07-20.** Profile memory now has stable-ID, revision-checked editing and canonical deletion; retained session summaries can be cleared without resetting accounting or implying activity-history/handoff erasure; unified grouped recall spans Profile, Session, and Knowledge while keeping Knowledge citations request-scoped; and the dashboard visibly exposes provenance, timestamps, retention boundaries, and deletion consequences. Reviewed conversation extraction, contradiction/outdated-fact policy, supersession history, and automatic durable writes remain deliberately deferred pending an explicit review/conflict contract.
+
 ### Goal
 
 Finish the three-way memory model.
@@ -650,14 +652,26 @@ Knowledge
 - Knowledge sources are searchable and cited.
 - Every memory item has provenance.
 
-### Done When
+### Phase 6A Done
 
 Alfred can show:
 
-- what it remembers
-- where it came from
-- when it was stored
-- how to delete it
+- what it remembers across grouped Profile, Session, and Knowledge recall
+- where it came from, including available source/request/turn identifiers
+- when it was stored, created, updated, and indexed
+- how each memory class is deleted and what remains afterward
+- explicit, conflict-safe profile editing
+- turn-only working-memory clearing that retains accounting, activity history, and handoffs
+
+### Deferred Phase 6B Decisions
+
+- Explicitly invoked, reviewed conversation-to-profile extraction (proposal only until per-item acceptance)
+- Key/entity conflict and case/alias policy
+- Manual-versus-conversation precedence and optimistic acceptance behavior
+- Outdated-fact/supersession representation and deletion semantics
+- Sensitive-category eligibility, candidate retention, and confidence semantics
+
+No background extraction, auto-accept, or silent durable conversation write is approved by Phase 6A.
 
 ---
 

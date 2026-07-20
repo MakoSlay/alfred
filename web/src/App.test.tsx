@@ -7,7 +7,14 @@ const api = vi.hoisted(() => ({
   state: vi.fn(),
   tools: vi.fn(),
   addFact: vi.fn(),
+  updateFact: vi.fn(),
   deleteFact: vi.fn(),
+  clearSessionMemory: vi.fn(),
+  recallMemory: vi.fn(),
+  importKnowledge: vi.fn(),
+  deleteKnowledge: vi.fn(),
+  reindexKnowledge: vi.fn(),
+  searchKnowledge: vi.fn(),
   ask: vi.fn(),
   updateAutonomy: vi.fn(),
   restoreUndo: vi.fn(),
@@ -145,6 +152,60 @@ describe("Autonomy controls", () => {
     await user.click(screen.getByRole("button", { name: "Auto-approve routine mutations" }));
     expect(api.updateAutonomy).toHaveBeenCalledWith(true);
     expect(api.ask).not.toHaveBeenCalled();
+  });
+});
+
+describe("Memory lifecycle actions", () => {
+  it("updates a profile fact through the revision-checked API", async () => {
+    const user = userEvent.setup();
+    const original = fact("profile-theme", "theme", "estate");
+    const updated = { ...original, key: "visual_theme", value: "cave", updatedAt: "2026-07-14T10:05:00.000Z" };
+    api.state.mockResolvedValueOnce(state([original])).mockResolvedValue(state([updated]));
+    api.updateFact.mockResolvedValue({ ok: true, fact: updated });
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Edit theme" }));
+    await user.clear(screen.getByLabelText("Key"));
+    await user.type(screen.getByLabelText("Key"), "visual_theme");
+    await user.clear(screen.getByLabelText("Value"));
+    await user.type(screen.getByLabelText("Value"), "cave");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(api.updateFact).toHaveBeenCalledWith("profile-theme", { key: "visual_theme", value: "cave", category: "preference" }, timestamp);
+    expect(await screen.findByText("cave")).toBeVisible();
+  });
+
+  it("returns profile deletion success to the page for local status and focus handling", async () => {
+    const user = userEvent.setup();
+    const original = fact("profile-theme", "theme", "estate");
+    api.state.mockResolvedValueOnce(state([original])).mockResolvedValue(state([]));
+    api.deleteFact.mockResolvedValue({ ok: true, removed: true, id: original.id });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Delete theme" }));
+    expect(api.deleteFact).toHaveBeenCalledWith("profile-theme");
+    expect(await screen.findByText(/Profile memory deleted/)).toBeVisible();
+    expect(screen.getByLabelText("Filter profile facts")).toHaveFocus();
+  });
+
+  it("clears working-memory summaries while reporting retained history", async () => {
+    const user = userEvent.setup();
+    const initial = state([]);
+    initial.memoryTurns = 1;
+    initial.memory.session = {
+      ephemeral: true, count: 1, currentContextTokens: 12, cumulativeTotalTokens: 42,
+      records: [{ id: "session-1", kind: "session", ephemeral: true, userText: "hello", finalSpeech: "hello", toolsUsed: [], workspaceHint: "", shortOutcome: "answered", createdAt: timestamp, updatedAt: timestamp, provenance: { source: "conversation", timestamp } }],
+    };
+    const cleared = state([]);
+    cleared.memory.session.currentContextTokens = 12;
+    cleared.memory.session.cumulativeTotalTokens = 42;
+    api.state.mockResolvedValueOnce(initial).mockResolvedValue(cleared);
+    api.clearSessionMemory.mockResolvedValue({ ok: true, removed: 1, session: { count: 0, currentContextTokens: 12, cumulativeTotalTokens: 42 }, retained: ["activity history"] });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<App />);
+    await user.click(await screen.findByRole("tab", { name: /Session/ }));
+    await user.click(screen.getByRole("button", { name: "Clear working memory" }));
+    expect(api.clearSessionMemory).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/durable activity history were retained/)).toBeVisible();
+    expect(screen.getByText("42 cumulative tokens")).toBeVisible();
   });
 });
 

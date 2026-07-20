@@ -10,6 +10,8 @@ import { classifyToolRisk } from "../src/alfred-2/risk.ts";
 import { startAlfred2 } from "../src/alfred-2/server.ts";
 import { PendingConfirmationStore } from "../src/alfred-2/confirmation.ts";
 import { runToolLoop } from "../src/alfred-2/tool-loop.ts";
+import { createSessionMemory } from "../src/alfred-2/memory.ts";
+import { createProfileStore } from "../src/alfred-2/profile.ts";
 import { importKnowledge } from "../src/alfred-2/tools/knowledge.ts";
 import type { AlfredToolCall } from "../src/alfred-2/tool-types.ts";
 
@@ -130,6 +132,66 @@ test("search_knowledge is parsed and read-only, and tool-loop citations are requ
 		assert.match(result.displayText, /Sources/);
 		assert.match(result.displayText, /Garden notes/);
 		assert.doesNotMatch(result.speech, /knowledge:|Sources/);
+	} finally {
+		rmSync(paths.root, { recursive: true, force: true });
+	}
+});
+
+test("unified recall exposes only request-scoped Knowledge citations", async () => {
+	const paths = temporaryKnowledge();
+	try {
+		const store = createKnowledgeStore(paths.knowledge);
+		const profileStore = createProfileStore(paths.profile);
+		const imported = store.ingest({ title: "Launch notes", content: "The launch signal is amber lantern." });
+		const citationId = store.search("amber lantern")[0]!.citationId;
+		const result = await runToolLoop({
+			llmClient: createFakeLlmClient([
+				'{"tool":"recall","query":"amber lantern","kinds":["knowledge"]}',
+				JSON.stringify({ speech: "The signal is amber lantern, sir.", citations: [citationId, "knowledge:invented"] }),
+			]),
+			userText: "Recall the launch signal",
+			systemContext: "Current date: 2026-07-14",
+			requestId: "req-unified-recall",
+			sessionId: "session-unified-recall",
+			profileStore,
+			knowledgeStore: store,
+			memory: createSessionMemory(),
+			speakAcknowledgements: false,
+		});
+		assert.equal(result.citations.length, 1);
+		assert.equal(result.citations[0]?.sourceId, imported.source.id);
+		assert.equal(result.citations[0]?.citationId, citationId);
+		assert.doesNotMatch(JSON.stringify(result.citations), /invented/);
+	} finally {
+		rmSync(paths.root, { recursive: true, force: true });
+	}
+});
+
+test("Knowledge-backed answers fail closed when citation repair remains uncited", async () => {
+	const paths = temporaryKnowledge();
+	try {
+		const store = createKnowledgeStore(paths.knowledge);
+		store.ingest({ title: "Launch notes", content: "The launch signal is amber lantern." });
+		const result = await runToolLoop({
+			llmClient: createFakeLlmClient([
+				'{"tool":"recall","query":"amber lantern","kinds":["knowledge"]}',
+				'{"speech":"The signal is amber lantern, sir."}',
+				'{"speech":"The signal is amber lantern, sir."}',
+			]),
+			userText: "Recall the launch signal",
+			systemContext: "Current date: 2026-07-14",
+			requestId: "req-unified-recall-uncited",
+			sessionId: "session-unified-recall-uncited",
+			profileStore: createProfileStore(paths.profile),
+			knowledgeStore: store,
+			memory: createSessionMemory(),
+			speakAcknowledgements: false,
+		});
+		assert.equal(result.outcome.status, "failed");
+		assert.deepEqual(result.citations, []);
+		assert.match(result.displayText, /citation was missing or invalid/i);
+		assert.doesNotMatch(result.speech, /amber lantern/i);
+		assert.doesNotMatch(result.displayText, /amber lantern/i);
 	} finally {
 		rmSync(paths.root, { recursive: true, force: true });
 	}
@@ -303,10 +365,19 @@ test("knowledge dashboard APIs ingest, search, reindex, hydrate, and delete sour
 	try {
 		const blockedOrigin = await fetch(`${baseUrl}/api/memory/knowledge/sources`, { headers: { Origin: "https://evil.example" } });
 		assert.equal(blockedOrigin.status, 403);
+		assert.equal(blockedOrigin.headers.get("cache-control"), "no-store");
 		const wrongContentType = await fetch(`${baseUrl}/api/memory/knowledge/search`, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ query: "launch" }) });
 		assert.equal(wrongContentType.status, 415);
+		assert.equal(wrongContentType.headers.get("cache-control"), "no-store");
 		const oversized = await fetch(`${baseUrl}/api/memory/knowledge/sources`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "Too large", content: "x".repeat(5 * 1024 * 1024) }) });
 		assert.equal(oversized.status, 413);
+		assert.equal(oversized.headers.get("cache-control"), "no-store");
+		const malformedDelete = await fetch(`${baseUrl}/api/memory/knowledge/sources/%`, { method: "DELETE" });
+		assert.equal(malformedDelete.status, 400);
+		assert.equal(malformedDelete.headers.get("cache-control"), "no-store");
+		const malformedReindex = await fetch(`${baseUrl}/api/memory/knowledge/sources/%/reindex`, { method: "POST" });
+		assert.equal(malformedReindex.status, 400);
+		assert.equal(malformedReindex.headers.get("cache-control"), "no-store");
 
 		const importedResponse = await fetch(`${baseUrl}/dashboard/knowledge/sources`, {
 			method: "POST",
@@ -315,6 +386,8 @@ test("knowledge dashboard APIs ingest, search, reindex, hydrate, and delete sour
 		});
 		assert.equal(importedResponse.status, 201);
 		const imported = await importedResponse.json() as { source: { id: string } };
+		const sourceListResponse = await fetch(`${baseUrl}/api/memory/knowledge/sources`);
+		assert.equal(sourceListResponse.headers.get("cache-control"), "no-store");
 
 		const state = await fetch(`${baseUrl}/dashboard/state`).then((response) => response.json()) as { memory: { knowledge: { available: boolean; count: number } } };
 		assert.equal(state.memory.knowledge.available, true);

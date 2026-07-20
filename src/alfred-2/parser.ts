@@ -204,10 +204,16 @@ function validateToolCall(obj: Record<string, unknown>, tool: AlfredToolName): V
 				error = "category must be preference, identity, context, or note when provided";
 			}
 			break;
-		case "recall":
-			error = rejectExtra(["query"]);
-			if (!error && obj.query !== undefined && typeof obj.query !== "string") error = "query must be a string when provided";
+		case "recall": {
+			error = rejectExtra(["query", "kinds", "limit"]);
+			const query = typeof obj.query === "string" ? obj.query.trim() : "";
+			if (!error && !query) error = "recall requires non-empty string field: query";
+			if (!error && query.length > 500) error = "query must be at most 500 characters";
+			if (!error && obj.kinds !== undefined && (!Array.isArray(obj.kinds) || obj.kinds.length === 0 || obj.kinds.some((kind) => !["profile", "session", "knowledge"].includes(String(kind))))) error = "kinds must be a non-empty array containing profile, session, or knowledge";
+			if (!error && obj.limit !== undefined && (!Number.isInteger(obj.limit) || typeof obj.limit !== "number" || obj.limit < 1 || obj.limit > 10)) error = "limit must be an integer from 1 to 10 when provided";
+			if (!error) obj.query = query;
 			break;
+		}
 		case "search_knowledge":
 			error = rejectExtra(["query", "topK", "limit", "sourceId"]);
 			if (!error) error = requireString("query");

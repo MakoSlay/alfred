@@ -5,6 +5,8 @@ import type {
   KnowledgeImportRequest,
   KnowledgeSearchResponse,
   KnowledgeSourceRecord,
+  MemoryKind,
+  MemoryRecallResponse,
   ProfileFact,
   ToolsResponse,
   TtsSettings,
@@ -57,8 +59,14 @@ export const alfredApi = {
   }),
   addFact: (fact: Pick<ProfileFact, "key" | "value" | "category">) =>
     request<{ ok: true; fact: ProfileFact }>("/dashboard/facts", jsonInit("POST", fact)),
+  updateFact: (id: string, patch: Pick<ProfileFact, "key" | "value" | "category">, expectedUpdatedAt: string) =>
+    request<{ ok: true; fact: ProfileFact }>(`/api/memory/profile/${encodeURIComponent(id)}`, jsonInit("PATCH", { ...patch, expectedUpdatedAt })),
   deleteFact: (id: string) =>
-    request<{ ok: true; removed: true; id: string }>(`/dashboard/facts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    request<{ ok: true; removed: true; id: string }>(`/api/memory/profile/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  clearSessionMemory: () =>
+    request<{ ok: true; removed: number; session: { count: number; currentContextTokens: number; cumulativeTotalTokens: number }; retained: string[] }>("/api/memory/session", { method: "DELETE" }),
+  recallMemory: (query: string, kinds: MemoryKind[], limit = 5) =>
+    request<MemoryRecallResponse & { ok: true }>("/api/memory/recall", jsonInit("POST", { query, kinds, limit })),
   importKnowledge: (input: KnowledgeImportRequest) =>
     request<{ ok: true; source: KnowledgeSourceRecord; created: boolean }>("/api/memory/knowledge/sources", jsonInit("POST", input)),
   deleteKnowledge: (id: string) =>

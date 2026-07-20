@@ -53,6 +53,18 @@ export interface ProfileMemoryWrite {
 	category?: ProfileMemoryCategory;
 }
 
+export interface ProfileMemoryPatch {
+	key?: string;
+	value?: string;
+	category?: ProfileMemoryCategory;
+}
+
+export class ProfileMemoryConflictError extends Error {
+	readonly code = "profile_memory_conflict";
+}
+
+class ProfileMemoryNotFoundError extends Error {}
+
 export interface ProfileStore {
 	readonly filePath: string;
 	loadProfile(): UserProfile;
@@ -65,6 +77,7 @@ export interface ProfileStore {
 		provenance?: MemoryProvenance,
 	): UserFact;
 	rememberProfileMemory(write: ProfileMemoryWrite, provenance: MemoryProvenance): UserFact;
+	updateProfileMemory(id: string, patch: ProfileMemoryPatch, expectedUpdatedAt: string, provenance: MemoryProvenance): UserFact | null;
 	recallFact(key?: string): UserFact[];
 	forgetFact(key: string): boolean;
 	forgetProfileMemory(id: string): boolean;
@@ -94,6 +107,23 @@ function stableProfileId(key: string, createdAt: string, discriminator = ""): st
 
 function contentRevision(content: string): string {
 	return createHash("sha256").update(content).digest("hex");
+}
+
+function normalizeProfileTimestamp(value: string): string {
+	const timestamp = Date.parse(value);
+	if (!Number.isFinite(timestamp)) throw new Error("Profile memory provenance requires a valid timestamp.");
+	return new Date(timestamp).toISOString();
+}
+
+function nextProfileTimestamp(previous: string, candidate: string): string {
+	const candidateTimestamp = Date.parse(candidate);
+	if (!Number.isFinite(candidateTimestamp)) throw new Error("Profile memory provenance requires a valid timestamp.");
+	const previousTimestamp = Date.parse(previous);
+	const nextTimestamp = Number.isFinite(previousTimestamp)
+		? Math.max(candidateTimestamp, previousTimestamp + 1)
+		: candidateTimestamp;
+	if (!Number.isFinite(nextTimestamp) || nextTimestamp > 8.64e15) throw new Error("Profile memory timestamp cannot advance further.");
+	return new Date(nextTimestamp).toISOString();
 }
 
 function nonEmptyString(value: unknown): string | undefined {
@@ -326,35 +356,79 @@ export function createProfileStore(filePath: string = DEFAULT_PROFILE_FILE): Pro
 
 	function rememberProfileMemory(write: ProfileMemoryWrite, provenance: MemoryProvenance): UserFact {
 		return withFreshProfile((current) => {
-			const now = provenance.timestamp || new Date().toISOString();
 			const existing = current.facts.findIndex((fact) => fact.key === write.key);
 			if (existing >= 0) {
 				const prior = current.facts[existing]!;
+				const updatedAt = nextProfileTimestamp(prior.updatedAt, provenance.timestamp);
 				current.facts[existing] = {
 					...prior,
 					value: write.value,
 					category: write.category ?? prior.category,
-					updatedAt: now,
-					provenance: { ...provenance, timestamp: now },
+					updatedAt,
+					provenance: { ...provenance, timestamp: updatedAt },
 					source: provenanceSourceToLegacy(provenance.source),
 				};
 				return current.facts[existing]!;
 			}
+			const createdAt = normalizeProfileTimestamp(provenance.timestamp);
 			const fact: UserFact = {
-				id: stableProfileId(write.key, now),
+				id: stableProfileId(write.key, createdAt),
 				kind: "profile",
 				key: write.key,
 				value: write.value,
 				category: write.category ?? "note",
-				createdAt: now,
-				updatedAt: now,
-				provenance: { ...provenance, timestamp: now },
-				addedAt: now,
+				createdAt,
+				updatedAt: createdAt,
+				provenance: { ...provenance, timestamp: createdAt },
+				addedAt: createdAt,
 				source: provenanceSourceToLegacy(provenance.source),
 			};
 			current.facts.push(fact);
 			return fact;
 		});
+	}
+
+	function updateProfileMemory(
+		id: string,
+		patch: ProfileMemoryPatch,
+		expectedUpdatedAt: string,
+		provenance: MemoryProvenance,
+	): UserFact | null {
+		try {
+			return withFreshProfile((current) => {
+				const index = current.facts.findIndex((fact) => fact.id === id);
+				if (index < 0) throw new ProfileMemoryNotFoundError();
+				const prior = current.facts[index]!;
+				if (prior.updatedAt !== expectedUpdatedAt) {
+					throw new ProfileMemoryConflictError("Profile memory changed since it was loaded. Refresh and review the latest value before saving.");
+				}
+				const key = patch.key === undefined ? prior.key : patch.key.trim();
+				const value = patch.value === undefined ? prior.value : patch.value.trim();
+				if (!key) throw new Error("Profile memory key is required.");
+				if (!value) throw new Error("Profile memory value is required.");
+				if (current.facts.some((fact, otherIndex) => otherIndex !== index && fact.key === key)) {
+					throw new ProfileMemoryConflictError(`Another profile memory already uses the key ${JSON.stringify(key)}.`);
+				}
+				const updatedAt = nextProfileTimestamp(prior.updatedAt, provenance.timestamp);
+				const updated: UserFact = {
+					...prior,
+					id: prior.id,
+					key,
+					value,
+					category: patch.category ?? prior.category,
+					createdAt: prior.createdAt,
+					updatedAt,
+					provenance: { ...provenance, timestamp: updatedAt },
+					addedAt: prior.addedAt,
+					source: provenanceSourceToLegacy(provenance.source),
+				};
+				current.facts[index] = updated;
+				return updated;
+			});
+		} catch (cause) {
+			if (cause instanceof ProfileMemoryNotFoundError) return null;
+			throw cause;
+		}
 	}
 
 	function rememberFact(
@@ -438,6 +512,7 @@ export function createProfileStore(filePath: string = DEFAULT_PROFILE_FILE): Pro
 		saveProfile,
 		rememberFact,
 		rememberProfileMemory,
+		updateProfileMemory,
 		recallFact,
 		forgetFact,
 		forgetProfileMemory,
@@ -465,6 +540,12 @@ export const rememberProfileMemory = (
 	write: ProfileMemoryWrite,
 	provenance: MemoryProvenance,
 ): UserFact => defaultProfileStore.rememberProfileMemory(write, provenance);
+export const updateProfileMemory = (
+	id: string,
+	patch: ProfileMemoryPatch,
+	expectedUpdatedAt: string,
+	provenance: MemoryProvenance,
+): UserFact | null => defaultProfileStore.updateProfileMemory(id, patch, expectedUpdatedAt, provenance);
 export const recallFact = (key?: string): UserFact[] => defaultProfileStore.recallFact(key);
 export const forgetFact = (key: string): boolean => defaultProfileStore.forgetFact(key);
 export const forgetProfileMemory = (id: string): boolean => defaultProfileStore.forgetProfileMemory(id);

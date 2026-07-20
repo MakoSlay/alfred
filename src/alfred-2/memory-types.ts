@@ -97,6 +97,39 @@ export type KnowledgeCitation = KnowledgeSearchMatch;
 
 export type MemoryRecord = ProfileMemoryRecord | SessionMemoryRecord | KnowledgeSourceRecord;
 
+export interface ProfileMemoryRecallResult {
+	kind: "profile";
+	record: ProfileMemoryRecord;
+}
+
+export interface SessionMemoryRecallResult {
+	kind: "session";
+	record: SessionMemoryRecord;
+}
+
+export interface KnowledgeMemoryRecallResult {
+	kind: "knowledge";
+	record: KnowledgeSourceRecord;
+	citation: KnowledgeSearchMatch;
+}
+
+export type MemoryRecallResult = ProfileMemoryRecallResult | SessionMemoryRecallResult | KnowledgeMemoryRecallResult;
+
+/** Grouped because lexical Knowledge scores are not comparable with profile/session substring matches. */
+export interface MemoryRecallResponse {
+	query: string;
+	kinds: MemoryKind[];
+	limit: number;
+	total: number;
+	groups: {
+		profile: ProfileMemoryRecallResult[];
+		session: SessionMemoryRecallResult[];
+		knowledge: KnowledgeMemoryRecallResult[];
+	};
+	/** Exact Knowledge passages that may be cited for this request only. */
+	citations: KnowledgeCitation[];
+}
+
 /** Shared backend/frontend hydration contract for the Memory page. */
 export interface MemoryDashboardState {
 	profile: {

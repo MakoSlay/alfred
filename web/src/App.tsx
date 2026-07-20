@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { alfredApi } from "./api/client";
-import type { DashboardState, KnowledgeImportRequest, KnowledgeSearchMatch, ProfileFact, ToolContract, TtsSettingsPatch } from "./api/types";
+import type { DashboardState, KnowledgeImportRequest, KnowledgeSearchMatch, MemoryKind, MemoryRecallResponse, ProfileFact, ToolContract, TtsSettingsPatch } from "./api/types";
 import { AppShell, type PageId } from "./components/AppShell";
 import { MemoryPage } from "./pages/MemoryPage";
 import { RadarPage } from "./pages/RadarPage";
@@ -134,13 +134,35 @@ export default function App() {
     });
   }
 
-  async function deleteFact(id: string) {
-    await runAction(async () => {
+  async function updateFact(id: string, fact: Pick<ProfileFact, "key" | "value" | "category">, expectedUpdatedAt: string): Promise<boolean> {
+    return runAction(async () => {
+      const result = await alfredApi.updateFact(id, fact, expectedUpdatedAt);
+      ++refreshSequence.current;
+      setState((current) => current ? upsertProfileFact(current, result.fact) : current);
+      return "Profile memory updated.";
+    });
+  }
+
+  async function deleteFact(id: string): Promise<boolean> {
+    return runAction(async () => {
       await alfredApi.deleteFact(id);
       ++refreshSequence.current;
       setState((current) => current ? removeProfileFact(current, id) : current);
       return "Fact forgotten.";
     });
+  }
+
+  async function clearSessionMemory(): Promise<boolean> {
+    return runAction(async () => {
+      const result = await alfredApi.clearSessionMemory();
+      return `Cleared ${result.removed} working-memory summar${result.removed === 1 ? "y" : "ies"}. Token accounting and durable activity history were retained.`;
+    });
+  }
+
+  async function recallMemory(query: string, kinds: MemoryKind[]): Promise<MemoryRecallResponse> {
+    const result = await alfredApi.recallMemory(query, kinds);
+    setNotice(result.total ? `Found ${result.total} memory result${result.total === 1 ? "" : "s"}.` : "No memory matches found.");
+    return result;
   }
 
   async function importKnowledge(input: KnowledgeImportRequest): Promise<boolean> {
@@ -220,7 +242,7 @@ export default function App() {
   switch (page) {
     case "radar": content = <RadarPage busy={busy} events={events} onAsk={ask} state={state} />; break;
     case "voice": content = <VoicePage connection={connection} latestEvent={latestEvent} onSave={saveTts} onTest={testTts} settings={state.tts} />; break;
-    case "memory": content = <MemoryPage onAdd={addFact} onDelete={deleteFact} onDeleteKnowledge={deleteKnowledge} onImportKnowledge={importKnowledge} onReindexKnowledge={reindexKnowledge} onSearchKnowledge={searchKnowledge} state={state} />; break;
+    case "memory": content = <MemoryPage onAdd={addFact} onClearSession={clearSessionMemory} onDelete={deleteFact} onDeleteKnowledge={deleteKnowledge} onImportKnowledge={importKnowledge} onRecall={recallMemory} onReindexKnowledge={reindexKnowledge} onSearchKnowledge={searchKnowledge} onUpdate={updateFact} state={state} />; break;
     case "safety": content = <SafetyPage onClear={clearUndo} onRestore={restoreUndo} onToggleAutoConfirm={toggleAutoConfirm} onToggleMute={toggleMute} state={state} />; break;
     case "tools": content = <ToolsPage events={events} onAskCapabilities={() => ask("what can you do?")} tools={tools} />; break;
     case "settings": content = <SettingsPage connection={connection} onThemeChange={setTheme} state={state} theme={theme} />; break;

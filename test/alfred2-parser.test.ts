@@ -107,6 +107,20 @@ test("schema-invalid JSON is retryable on first attempt", () => {
 	assert.match(result.error, /command/);
 });
 
+test("unified recall requires a bounded query and strict kind filters", () => {
+	const parsed = assertKind(parseAlfredModelResponse('{"tool":"recall","query":"launch","kinds":["profile","knowledge"],"limit":3}'), "tool");
+	assert.equal(parsed.value.tool, "recall");
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"recall"}'), "retryable_error").error, /query/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"recall","query":"launch","kinds":[]}'), "retryable_error").error, /kinds/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"recall","query":"launch","kinds":["history"]}'), "retryable_error").error, /kinds/);
+	const padded = assertKind(parseAlfredModelResponse('{"tool":"recall","query":" launch ","limit":10}'), "tool").value;
+	assert.equal(padded.tool, "recall");
+	assert.equal(padded.tool === "recall" ? padded.query : undefined, "launch");
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"recall","query":"   "}'), "retryable_error").error, /query/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"recall","query":"launch","limit":11}'), "retryable_error").error, /limit/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"recall","query":"launch","extra":true}'), "retryable_error").error, /unsupported/);
+});
+
 test("remember rejects unsupported profile categories", () => {
 	const result = assertKind(parseAlfredModelResponse('{"tool":"remember","key":"theme","value":"dark","category":"knowledge"}'), "retryable_error");
 	assert.match(result.error, /category must be preference, identity, context, or note/);

@@ -307,11 +307,20 @@ export function handoffFilePath(
 	return join(dir, `${timestamp}-session-${safeSession}-request-${safeRequest}.md`);
 }
 
+/** Clear retained working-memory turns without changing usage/context accounting. */
+export function clearSessionTurns(memory: SessionMemory): number {
+	const removed = memory.turns.length;
+	memory.turns = [];
+	return removed;
+}
+
 /**
- * Reset a SessionMemory to its initial empty state.
+ * Reset a SessionMemory to its initial empty state. This broader primitive is
+ * retained for explicit runtime/test resets; dashboard clearing uses
+ * clearSessionTurns so accounting and safety state remain intact.
  */
 export function clearMemory(memory: SessionMemory): void {
-	memory.turns = [];
+	clearSessionTurns(memory);
 	memory.cumulativeInputTokens = 0;
 	memory.cumulativeOutputTokens = 0;
 	memory.cumulativeTotalTokens = 0;

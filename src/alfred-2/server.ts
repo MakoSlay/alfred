@@ -9,10 +9,11 @@ import { buildRelevantSystemContext } from "./context-rag.ts";
 import { runToolLoop } from "./tool-loop.ts";
 import { speak, notify, getTtsSettings, updateTtsSettings, setSpeechSuppressionProvider, synthesizeSpeech, stopSpeech, type PublicTtsSettings, type SpeechLifecycleEvent } from "./speech.ts";
 import { createHistoryStore, formatHistoryForContext, getDefaultHistoryStore } from "./history.ts";
-import { createSessionMemory, getSessionMemoryRecords } from "./memory.ts";
-import { createProfileStore, getDefaultProfileStore } from "./profile.ts";
+import { clearSessionTurns, createSessionMemory, getSessionMemoryRecords } from "./memory.ts";
+import { createProfileStore, getDefaultProfileStore, ProfileMemoryConflictError } from "./profile.ts";
 import { createKnowledgeStore, getDefaultKnowledgeDirectory } from "./knowledge.ts";
-import type { MemoryDashboardState, ProfileMemoryRecord } from "./memory-types.ts";
+import { MAX_MEMORY_RECALL_LIMIT, MAX_MEMORY_RECALL_QUERY_LENGTH, recallMemory } from "./memory/recall.ts";
+import type { MemoryDashboardState, MemoryKind, ProfileMemoryCategory, ProfileMemoryRecord } from "./memory-types.ts";
 import { serveDashboardAsset } from "./dashboard-assets.ts";
 import { createAlfredEventBus, type AlfredEventBus } from "./events.ts";
 import { getPersonalityConfig, type AlfredPersonalityConfig } from "./personality.ts";
@@ -221,14 +222,16 @@ const TOOL_CONTRACTS: DashboardToolContract[] = [
 	},
 	{
 		name: "recall",
-		description: "Recall one or more remembered user facts.",
+		description: "Recall matching profile, session, and Knowledge memory in grouped results.",
 		schema: {
 			tool: "recall",
-			query: "optional string",
+			query: "required string",
+			kinds: "optional array of profile|session|knowledge",
+			limit: "optional integer 1-10 per group",
 		},
 		examples: [
-			'{ "tool": "recall" }',
 			'{ "tool": "recall", "query": "theme" }',
+			'{ "tool": "recall", "query": "launch", "kinds": ["session", "knowledge"], "limit": 5 }',
 		],
 		confirm: "none",
 	},
@@ -740,9 +743,9 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 	async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host ?? config.host}`);
 		const stateChanging = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE";
-		const privateRead = isKnowledgeApiPath(url.pathname) || url.pathname === "/api/goals" || url.pathname === "/api/scheduled-jobs";
+		const privateRead = url.pathname === "/dashboard/state" || isPrivateApiPath(url.pathname) || url.pathname === "/api/goals" || url.pathname === "/api/scheduled-jobs";
 		if ((stateChanging || privateRead) && !isAllowedLocalOrigin(req.headers.origin)) {
-			res.writeHead(403, { "Content-Type": "application/json" });
+			res.writeHead(403, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 			res.end(JSON.stringify({ ok: false, error: "State-changing and private API requests must originate from a loopback origin." }));
 			return;
 		}
@@ -774,7 +777,7 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 
 		// Dashboard state polling endpoint
 		if (req.method === "GET" && url.pathname === "/dashboard/state") {
-			res.writeHead(200, { "Content-Type": "application/json" });
+			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 			res.end(JSON.stringify({ ok: true, ...buildDashboardState() }));
 			return;
 		}
@@ -908,13 +911,13 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 			const value = typeof body?.value === "string" ? body.value.trim() : "";
 			const category = typeof body?.category === "string" ? body.category.trim() || undefined : undefined;
 			if (!key || !value) {
-				res.writeHead(400, { "Content-Type": "application/json" });
+				res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 				res.end(JSON.stringify({ ok: false, error: "key and value are required" }));
 				return;
 			}
 			const normalizedCategory = category as "preference" | "identity" | "context" | "note" | undefined;
 			if (normalizedCategory !== undefined && !["preference", "identity", "context", "note"].includes(normalizedCategory)) {
-				res.writeHead(400, { "Content-Type": "application/json" });
+				res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 				res.end(JSON.stringify({ ok: false, error: "Invalid category." }));
 				return;
 			}
@@ -927,18 +930,54 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 					timestamp: new Date().toISOString(),
 				},
 			);
-			res.writeHead(200, { "Content-Type": "application/json" });
+			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 			res.end(JSON.stringify({ ok: true, fact }));
 			return;
 		}
 
-		// Canonical profile-memory deletion by stable ID. Key-based /ask deletion remains compatible.
-		if (req.method === "DELETE") {
-			const factMatch = url.pathname.match(/^\/dashboard\/facts\/([^/]+)$/);
+		// Stable-ID profile edits use optimistic concurrency so a stale dashboard
+		// cannot overwrite a newer manual or tool-authored fact.
+		if (req.method === "PATCH") {
+			const factMatch = url.pathname.match(/^\/(?:api\/memory\/profile|dashboard\/facts)\/([^/]+)$/);
 			if (factMatch) {
-				const id = decodeURIComponent(factMatch[1] ?? "");
+				const body = await readJsonBody(req);
+				const allowed = new Set(["key", "value", "category", "expectedUpdatedAt"]);
+				if (!body || Object.keys(body).some((key) => !allowed.has(key)) || typeof body.expectedUpdatedAt !== "string" || !body.expectedUpdatedAt.trim()) {
+					throw new HttpRequestError(400, "expectedUpdatedAt is required and only key, value, category, and expectedUpdatedAt are supported.");
+				}
+				if (body.key === undefined && body.value === undefined && body.category === undefined) throw new HttpRequestError(400, "At least one profile memory field must be updated.");
+				if (body.key !== undefined && (typeof body.key !== "string" || !body.key.trim())) throw new HttpRequestError(400, "Profile memory key must be a non-empty string.");
+				if (body.value !== undefined && (typeof body.value !== "string" || !body.value.trim())) throw new HttpRequestError(400, "Profile memory value must be a non-empty string.");
+				if (body.category !== undefined && !["preference", "identity", "context", "note"].includes(String(body.category))) throw new HttpRequestError(400, "Invalid category.");
+				try {
+					const fact = profileStore.updateProfileMemory(
+						decodePathSegment(factMatch[1] ?? ""),
+						{
+							key: typeof body.key === "string" ? body.key : undefined,
+							value: typeof body.value === "string" ? body.value : undefined,
+							category: body.category as ProfileMemoryCategory | undefined,
+						},
+						body.expectedUpdatedAt,
+						{ source: "manual", sourceId: "dashboard", timestamp: new Date().toISOString() },
+					);
+					res.writeHead(fact ? 200 : 404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+					res.end(JSON.stringify(fact ? { ok: true, fact } : { ok: false, error: "Profile memory not found." }));
+				} catch (cause) {
+					if (!(cause instanceof ProfileMemoryConflictError)) throw cause;
+					res.writeHead(409, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+					res.end(JSON.stringify({ ok: false, code: cause.code, error: cause.message }));
+				}
+				return;
+			}
+		}
+
+		// Profile deletion removes only the fact with this stable ID.
+		if (req.method === "DELETE") {
+			const factMatch = url.pathname.match(/^\/(?:api\/memory\/profile|dashboard\/facts)\/([^/]+)$/);
+			if (factMatch) {
+				const id = decodePathSegment(factMatch[1] ?? "");
 				const removed = profileStore.forgetProfileMemory(id);
-				res.writeHead(removed ? 200 : 404, { "Content-Type": "application/json" });
+				res.writeHead(removed ? 200 : 404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 				res.end(JSON.stringify(removed
 					? { ok: true, removed: true, id }
 					: { ok: false, removed: false, error: "Profile memory not found." }));
@@ -946,11 +985,47 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 			}
 		}
 
+		if (req.method === "DELETE" && url.pathname === "/api/memory/session") {
+			const removed = clearSessionTurns(sessionMemory);
+			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+			res.end(JSON.stringify({
+				ok: true,
+				removed,
+				session: {
+					count: sessionMemory.turns.length,
+					currentContextTokens: sessionMemory.currentContextTokens,
+					cumulativeTotalTokens: sessionMemory.cumulativeTotalTokens,
+				},
+				retained: ["token accounting", "activity history", "handoffs", "profile memory", "knowledge sources"],
+			}));
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/api/memory/recall") {
+			const body = await readJsonBody(req);
+			if (!body || Object.keys(body).some((key) => !["query", "kinds", "limit"].includes(key))) throw new HttpRequestError(400, "Only query, kinds, and limit are supported.");
+			const query = typeof body.query === "string" ? body.query.trim() : "";
+			if (!query) throw new HttpRequestError(400, "query is required");
+			if (query.length > MAX_MEMORY_RECALL_QUERY_LENGTH) throw new HttpRequestError(400, `query must be at most ${MAX_MEMORY_RECALL_QUERY_LENGTH} characters`);
+			if (body?.kinds !== undefined && (!Array.isArray(body.kinds) || body.kinds.length === 0 || body.kinds.some((kind) => !["profile", "session", "knowledge"].includes(String(kind))))) throw new HttpRequestError(400, "kinds must be a non-empty array containing profile, session, or knowledge");
+			if (body?.limit !== undefined && (!Number.isInteger(body.limit) || typeof body.limit !== "number" || body.limit < 1 || body.limit > MAX_MEMORY_RECALL_LIMIT)) throw new HttpRequestError(400, `limit must be an integer from 1 to ${MAX_MEMORY_RECALL_LIMIT}`);
+			try {
+				const result = recallMemory({ query, kinds: body?.kinds as MemoryKind[] | undefined, limit: body?.limit as number | undefined }, { profile: profileStore, session: sessionMemory, knowledge: knowledgeStore });
+				res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+				res.end(JSON.stringify({ ok: true, ...result }));
+			} catch (cause) {
+				logPrivateMemoryFailure("api-recall", cause);
+				res.writeHead(503, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+				res.end(JSON.stringify({ ok: false, error: "Memory recall is temporarily unavailable." }));
+			}
+			return;
+		}
+
 		// Import Text/Markdown into the local lexical knowledge index. The /api/memory
 		// routes are canonical; dashboard aliases remain convenient for existing clients.
 		if (req.method === "GET" && (url.pathname === "/api/memory/knowledge/sources" || url.pathname === "/dashboard/knowledge/sources")) {
 			const sources = knowledgeStore.listSources();
-			res.writeHead(200, { "Content-Type": "application/json" });
+			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 			res.end(JSON.stringify({ ok: true, count: sources.length, sources }));
 			return;
 		}
@@ -958,7 +1033,7 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 		if (req.method === "POST" && (url.pathname === "/api/memory/knowledge/sources" || url.pathname === "/dashboard/knowledge/sources")) {
 			const body = await readKnowledgeJsonBody(req);
 			if (body?.sourceType !== undefined && !["document", "note", "project"].includes(String(body.sourceType))) {
-				res.writeHead(400, { "Content-Type": "application/json" });
+				res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 				res.end(JSON.stringify({ ok: false, error: "Invalid knowledge source type." }));
 				return;
 			}
@@ -970,10 +1045,10 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 					location: typeof body?.location === "string" ? body.location : undefined,
 					mimeType: typeof body?.mimeType === "string" ? body.mimeType : undefined,
 				});
-				res.writeHead(result.created ? 201 : 200, { "Content-Type": "application/json" });
+				res.writeHead(result.created ? 201 : 200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 				res.end(JSON.stringify({ ok: true, ...result }));
 			} catch (cause) {
-				res.writeHead(400, { "Content-Type": "application/json" });
+				res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 				res.end(JSON.stringify({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }));
 			}
 			return;
@@ -982,9 +1057,9 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 		if (req.method === "DELETE") {
 			const sourceMatch = url.pathname.match(/^\/(?:api\/memory|dashboard)\/knowledge\/sources\/([^/]+)$/);
 			if (sourceMatch) {
-				const id = decodeURIComponent(sourceMatch[1] ?? "");
+				const id = decodePathSegment(sourceMatch[1] ?? "");
 				const removed = knowledgeStore.deleteSource(id);
-				res.writeHead(removed ? 200 : 404, { "Content-Type": "application/json" });
+				res.writeHead(removed ? 200 : 404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 				res.end(JSON.stringify(removed ? { ok: true, removed: true, id } : { ok: false, removed: false, error: "Knowledge source not found." }));
 				return;
 			}
@@ -993,14 +1068,14 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 		if (req.method === "POST") {
 			const reindexMatch = url.pathname.match(/^\/(?:api\/memory|dashboard)\/knowledge\/sources\/([^/]+)\/reindex$/);
 			if (reindexMatch) {
-				const id = decodeURIComponent(reindexMatch[1] ?? "");
+				const id = decodePathSegment(reindexMatch[1] ?? "");
 				const body = await readKnowledgeJsonBody(req);
 				try {
 					const source = knowledgeStore.reindexSource(id, typeof body?.content === "string" ? body.content : undefined);
-					res.writeHead(source ? 200 : 404, { "Content-Type": "application/json" });
+					res.writeHead(source ? 200 : 404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 					res.end(JSON.stringify(source ? { ok: true, source } : { ok: false, error: "Knowledge source not found." }));
 				} catch (cause) {
-					res.writeHead(400, { "Content-Type": "application/json" });
+					res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 					res.end(JSON.stringify({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }));
 				}
 				return;
@@ -1011,7 +1086,7 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 			const body = await readKnowledgeJsonBody(req);
 			const query = typeof body?.query === "string" ? body.query.trim() : "";
 			if (!query) {
-				res.writeHead(400, { "Content-Type": "application/json" });
+				res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 				res.end(JSON.stringify({ ok: false, error: "query is required" }));
 				return;
 			}
@@ -1019,7 +1094,7 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 				limit: typeof body?.limit === "number" ? body.limit : undefined,
 				sourceId: typeof body?.sourceId === "string" ? body.sourceId : undefined,
 			});
-			res.writeHead(200, { "Content-Type": "application/json" });
+			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 			res.end(JSON.stringify({ ok: true, query, matches }));
 			return;
 		}
@@ -1592,7 +1667,9 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 				res.destroy();
 				return;
 			}
-			res.writeHead(cause instanceof HttpRequestError ? cause.statusCode : 500, { "Content-Type": "application/json" });
+			const headers: Record<string, string> = { "Content-Type": "application/json" };
+			if (isPrivateMemoryRequest(req)) headers["Cache-Control"] = "no-store";
+			res.writeHead(cause instanceof HttpRequestError ? cause.statusCode : 500, headers);
 			res.end(JSON.stringify({ ok: false, error: message }));
 		});
 	});
@@ -1785,8 +1862,35 @@ function isLoopbackHost(host: string): boolean {
 	return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
 }
 
-function isKnowledgeApiPath(pathname: string): boolean {
-	return pathname.startsWith("/api/memory/knowledge/") || pathname.startsWith("/dashboard/knowledge/");
+function isPrivateApiPath(pathname: string): boolean {
+	return pathname === "/api/memory" || pathname.startsWith("/api/memory/") || pathname.startsWith("/dashboard/knowledge/");
+}
+
+function isPrivateMemoryRequest(req: IncomingMessage): boolean {
+	try {
+		const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+		return pathname === "/dashboard/state"
+			|| pathname === "/dashboard/facts"
+			|| pathname.startsWith("/dashboard/facts/")
+			|| pathname.startsWith("/dashboard/knowledge/")
+			|| pathname === "/api/memory"
+			|| pathname.startsWith("/api/memory/");
+	} catch {
+		return false;
+	}
+}
+
+function logPrivateMemoryFailure(component: string, cause: unknown): void {
+	const detail = cause instanceof Error ? cause.message : String(cause);
+	console.warn(`[memory:${component}] ${detail.slice(0, 500)}`);
+}
+
+function decodePathSegment(value: string): string {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		throw new HttpRequestError(400, "Path identifier is malformed.");
+	}
 }
 
 function isAllowedLocalOrigin(origin: string | undefined): boolean {

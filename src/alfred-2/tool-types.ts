@@ -1,5 +1,5 @@
 import type { StructuredFailure } from "./capabilities/failure-codes.ts";
-import type { KnowledgeCitation } from "./memory-types.ts";
+import type { KnowledgeCitation, MemoryKind } from "./memory-types.ts";
 
 export const ALFRED_TOOL_NAMES = [
 	"bash",
@@ -47,7 +47,7 @@ export const ALFRED_TOOL_PROMPT_SNIPPETS: Record<AlfredToolName, string> = {
 	web_search: 'web_search: {"tool":"web_search","query":"search query","numResults":5}',
 	fetch_content: 'fetch_content: {"tool":"fetch_content","url":"https://..."}',
 	remember: 'remember: {"tool":"remember","key":"fact name","value":"fact value","category":"preference|identity|context|note"}',
-	recall: 'recall: {"tool":"recall","query":"optional filter"}',
+	recall: 'recall: {"tool":"recall","query":"terms to find","kinds":["profile","session","knowledge"],"limit":5} — unified grouped memory recall; limit is 1-10 per group; Knowledge results may be cited',
 	search_knowledge: 'search_knowledge: {"tool":"search_knowledge","query":"terms to find","topK":5,"sourceId":"optional source id"} — searches imported Text/Markdown; cite returned IDs in the final citations array',
 	import_knowledge: 'import_knowledge: {"tool":"import_knowledge","path":"workspace-relative .txt/.md file","title":"optional"} or {"tool":"import_knowledge","title":"required note title","content":"assistant-created note","sourceType":"note"} — persistent mutation; use only when explicitly asked',
 	set_voice_settings: 'set_voice_settings: {"tool":"set_voice_settings","fishSpeed":1.1,"edgeRate":"+10%","speechStyle":"auto|neutral|warm|calm|dry|reassuring|sarcastic","witLevel":"off|light|medium","sarcasmLevel":"off|light|medium"}',
@@ -192,7 +192,9 @@ export interface RememberToolCall {
 
 export interface RecallToolCall {
 	tool: "recall";
-	query?: string;
+	query: string;
+	kinds?: MemoryKind[];
+	limit?: number;
 	requestId?: string;
 	toolCallId?: string;
 }
