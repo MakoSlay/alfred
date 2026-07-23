@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createFakeLlmClient } from "../src/alfred-2/agent.ts";
 import { createStructuredFailure, createTaskOutcomeFinalizer, type TaskOutcome } from "../src/alfred-2/capabilities/outcome.ts";
 import { parseAlfredModelResponse } from "../src/alfred-2/parser.ts";
+import { PendingConfirmationStore } from "../src/alfred-2/confirmation.ts";
 import { startAlfred2 } from "../src/alfred-2/server.ts";
 import { runToolLoop } from "../src/alfred-2/tool-loop.ts";
 import { fetchContent, webSearch } from "../src/alfred-2/tools/web.ts";
@@ -99,6 +100,28 @@ test("tool loop maps success, parser failure, max rounds, ambiguity, timeout, an
 	const handoff = await loop([], { initialSessionTokens: 99, sessionHandoffTokens: 1 });
 	assert.equal(handoff.outcome.status, "handed_off");
 	assert.equal(handoff.outcome.terminalFailure?.code, "budget.context_handoff");
+});
+
+test("expired confirmation is blocked and distinct from an unknown confirmation id", async () => {
+	const confirmationStore = new PendingConfirmationStore();
+	confirmationStore.add({
+		confirmationId: "confirm-expired",
+		requestId: "req-original",
+		toolCallId: "tool-original",
+		tool: "write_file",
+		risk: "mutation",
+		payload: { tool: "write_file", path: "note.txt", content: "hello" },
+		payloadHash: "",
+		preview: "write note.txt",
+		createdAt: "2020-01-01T00:00:00.000Z",
+		expiresAt: "2020-01-01T00:01:00.000Z",
+	});
+	const expired = await loop([], { confirm: true, confirmationId: "confirm-expired", confirmationStore });
+	const missing = await loop([], { confirm: true, confirmationId: "confirm-never-existed", confirmationStore });
+	assert.equal(expired.outcome.status, "blocked");
+	assert.equal(expired.outcome.terminalFailure?.code, "confirmation.expired");
+	assert.equal(missing.outcome.status, "needs_user_input");
+	assert.equal(missing.outcome.terminalFailure?.code, "contract.invalid_input");
 });
 
 test("provider rate limits, 5xx responses, and network errors produce distinct terminal outcomes", async () => {
