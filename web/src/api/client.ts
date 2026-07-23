@@ -5,9 +5,13 @@ import type {
   KnowledgeImportRequest,
   KnowledgeSearchResponse,
   KnowledgeSourceRecord,
+  MemoryCandidateBatch,
   MemoryKind,
   MemoryRecallResponse,
+  NoteContent,
+  NotesResponse,
   ProfileFact,
+  ReviewedMemoryCandidate,
   ToolsResponse,
   TtsSettings,
   TtsSettingsPatch,
@@ -64,9 +68,15 @@ export const alfredApi = {
   deleteFact: (id: string) =>
     request<{ ok: true; removed: true; id: string }>(`/api/memory/profile/${encodeURIComponent(id)}`, { method: "DELETE" }),
   clearSessionMemory: () =>
-    request<{ ok: true; removed: number; session: { count: number; currentContextTokens: number; cumulativeTotalTokens: number }; retained: string[] }>("/api/memory/session", { method: "DELETE" }),
+    request<{ ok: true; removed: number; removedCandidates: number; session: { count: number; currentContextTokens: number; cumulativeTotalTokens: number }; retained: string[] }>("/api/memory/session", { method: "DELETE" }),
   recallMemory: (query: string, kinds: MemoryKind[], limit = 5) =>
     request<MemoryRecallResponse & { ok: true }>("/api/memory/recall", jsonInit("POST", { query, kinds, limit })),
+  extractMemoryCandidates: (turnIds: string[], requestId = crypto.randomUUID()) =>
+    request<MemoryCandidateBatch & { ok: true }>("/api/memory/candidates/extract", jsonInit("POST", { requestId, turnIds })),
+  acceptMemoryCandidate: (batchId: string, candidateId: string, write: Pick<ReviewedMemoryCandidate, "key" | "value" | "category">) =>
+    request<{ ok: true; fact: ProfileFact; batchId: string; candidateId: string }>(`/api/memory/candidates/${encodeURIComponent(batchId)}/${encodeURIComponent(candidateId)}/accept`, jsonInit("POST", write)),
+  rejectMemoryCandidate: (batchId: string, candidateId: string) =>
+    request<{ ok: true; rejected: true; batchId: string; candidateId: string }>(`/api/memory/candidates/${encodeURIComponent(batchId)}/${encodeURIComponent(candidateId)}/reject`, jsonInit("POST", {})),
   importKnowledge: (input: KnowledgeImportRequest) =>
     request<{ ok: true; source: KnowledgeSourceRecord; created: boolean }>("/api/memory/knowledge/sources", jsonInit("POST", input)),
   deleteKnowledge: (id: string) =>
@@ -75,6 +85,9 @@ export const alfredApi = {
     request<{ ok: true; source: KnowledgeSourceRecord }>(`/api/memory/knowledge/sources/${encodeURIComponent(id)}/reindex`, jsonInit("POST", {})),
   searchKnowledge: (query: string, limit = 5) =>
     request<KnowledgeSearchResponse>("/api/memory/knowledge/search", jsonInit("POST", { query, limit })),
+  notes: () => request<NotesResponse>("/api/notes"),
+  readNote: (filename: string) => request<NoteContent>(`/api/notes/${encodeURIComponent(filename)}`),
+  openNote: (filename?: string) => request<{ ok: true; path: string; filename?: string; kind: "note" | "folder" }>("/api/notes/open", jsonInit("POST", filename ? { filename } : {})),
   restoreUndo: (id: string) =>
     request<{ ok: true; originalPath: string }>(`/dashboard/undo/${encodeURIComponent(id)}`, { method: "POST" }),
   clearUndo: () => request<{ ok: true; removed: number }>("/dashboard/undo", { method: "DELETE" }),

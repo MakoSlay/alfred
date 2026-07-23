@@ -4,12 +4,15 @@ import type {
   KnowledgeSearchMatch,
   KnowledgeSourceRecord,
   KnowledgeSourceType,
+  MemoryCandidateBatch,
   MemoryDashboardState,
   MemoryKind,
   MemoryRecallResponse,
   MemoryProvenance,
   MemoryProvenanceSource,
   ProfileMemoryRecord,
+  ReviewedMemoryCandidate,
+  ReviewedMemoryCategory,
   SessionMemoryRecord,
 } from "../../../src/alfred-2/memory-types";
 
@@ -43,11 +46,14 @@ export type {
   KnowledgeSearchMatch,
   KnowledgeSourceRecord,
   KnowledgeSourceType,
+  MemoryCandidateBatch,
   MemoryDashboardState,
   MemoryKind,
   MemoryRecallResponse,
   MemoryProvenance,
   MemoryProvenanceSource,
+  ReviewedMemoryCandidate,
+  ReviewedMemoryCategory,
   SessionMemoryRecord,
 };
 
@@ -145,6 +151,24 @@ export interface DashboardState {
   workAdvisor?: { autonomousEnabled: boolean; workspace: string | null; intervalMs: number; status: { consecutive: number; spokenToday: number; targetKey?: string; lastVerdictKey?: string } };
   recentResponses: RecentResponse[];
   lastUpdated: string;
+}
+
+export interface NoteSummary {
+  filename: string;
+  path: string;
+  bytes: number;
+  modifiedAt: string;
+}
+
+export interface NotesResponse {
+  ok: true;
+  directory: string;
+  notes: NoteSummary[];
+}
+
+export interface NoteContent extends NoteSummary {
+  ok: true;
+  content: string;
 }
 
 export interface ToolContract {

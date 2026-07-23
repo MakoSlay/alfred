@@ -6,21 +6,34 @@ import {
 	type PendingConfirmation,
 	type ToolRiskLevel,
 } from "./tool-types.ts";
+import { defaultNotesDirectory, resolveNotePath } from "./tools/note.ts";
 
 /**
  * Deterministic text preview for a pending confirmation.
  * Shows the exact command/payload and the resolved cwd so the user can
  * review exactly what will execute.
  */
-export function createConfirmationPreview(toolCall: AlfredToolCall, cwd?: string): string {
+export function createConfirmationPreview(toolCall: AlfredToolCall, cwd?: string, notesDirectory = defaultNotesDirectory()): string {
 	const cwdLine = cwd ? `\nCwd: ${cwd}` : "";
 	switch (toolCall.tool) {
 		case "bash":
-			return `[BASH] ${toolCall.command}${cwdLine}`;
+			return `[BASH] ${toolCall.command}\nScope: ${toolCall.scope ?? "workspace"}${cwdLine}`;
 		case "write_file":
 			return `[WRITE] ${toolCall.path}${cwdLine}`;
 		case "edit_file":
 			return `[EDIT] ${toolCall.path}\nOld: ${toolCall.oldText.slice(0, 200)}${toolCall.oldText.length > 200 ? "..." : ""}\nNew: ${toolCall.newText.slice(0, 200)}${toolCall.newText.length > 200 ? "..." : ""}${cwdLine}`;
+		case "save_note": {
+			const path = resolveNotePath(toolCall.filename, notesDirectory);
+			const bytes = Buffer.byteLength(toolCall.content, "utf8");
+			const contentPreview = toolCall.content.slice(0, 2_000);
+			return `[SAVE_NOTE]\nPath: ${path}\nBytes: ${bytes}\nOpen after save: ${toolCall.open !== false ? "yes" : "no"}\nOverwrite existing: ${toolCall.overwrite === true ? "yes" : "no"}\nContent:\n${contentPreview}${toolCall.content.length > contentPreview.length ? "\n[preview truncated]" : ""}`;
+		}
+		case "list_notes":
+			return `[LIST_NOTES] ${notesDirectory}`;
+		case "read_note":
+			return `[READ_NOTE] ${resolveNotePath(toolCall.filename, notesDirectory)}`;
+		case "open_note":
+			return toolCall.filename ? `[OPEN_NOTE] ${resolveNotePath(toolCall.filename, notesDirectory)}` : `[OPEN_NOTES_FOLDER] ${notesDirectory}`;
 		case "read_file":
 			return `[READ] ${toolCall.path}${cwdLine}`;
 		case "web_search":
@@ -92,8 +105,10 @@ export function createConfirmationPreview(toolCall: AlfredToolCall, cwd?: string
  * Uses deterministic JSON serialization so the same payload always produces the
  * same hash.
  */
-export function hashPayload(payload: AlfredToolCall): string {
-	const json = JSON.stringify(payload, Object.keys(payload).sort());
+export function hashPayload(payload: AlfredToolCall, executionContext?: { cwd?: string; workspaceRef?: string; notesDirectory?: string }): string {
+	const payloadJson = JSON.stringify(payload, Object.keys(payload).sort());
+	const contextJson = JSON.stringify(executionContext ?? {}, ["cwd", "workspaceRef", "notesDirectory"]);
+	const json = `${payloadJson}\n${contextJson}`;
 	return createHash("sha256").update(json, "utf8").digest("hex");
 }
 
@@ -127,7 +142,7 @@ export class PendingConfirmationStore<P extends AlfredToolCall = AlfredToolCall>
 			(confirmation as { confirmationId: string }).confirmationId = `confirm-${randomUUID()}`;
 		}
 		if (!confirmation.payloadHash) {
-			(confirmation as { payloadHash: string }).payloadHash = hashPayload(confirmation.payload);
+			(confirmation as { payloadHash: string }).payloadHash = hashPayload(confirmation.payload, confirmation.executionContext);
 		}
 		if (!confirmation.createdAt) {
 			(confirmation as { createdAt: string }).createdAt = new Date().toISOString();
@@ -203,7 +218,7 @@ export class PendingConfirmationStore<P extends AlfredToolCall = AlfredToolCall>
 	verifyIntegrity(id: string): boolean {
 		const confirmation = this.get(id);
 		if (!confirmation) return false;
-		const expected = hashPayload(confirmation.payload);
+		const expected = hashPayload(confirmation.payload, confirmation.executionContext);
 		if (confirmation.payloadHash !== expected) {
 			this.store.delete(id);
 			return false;

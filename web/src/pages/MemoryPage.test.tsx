@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { removeProfileFact, upsertProfileFact } from "../App";
@@ -292,6 +292,99 @@ describe("MemoryPage", () => {
     await Promise.resolve();
     expect(screen.queryByText("stale result")).not.toBeInTheDocument();
     expect(screen.getByText(/Memory-kind selection changed/)).toBeVisible();
+  });
+
+  it("extracts only explicitly selected user requests and keeps candidates ephemeral", async () => {
+    const user = userEvent.setup();
+    const state = dashboardState();
+    state.memory.session.records.push({ ...state.memory.session.records[0]!, id: "session-other", userText: "My name is Unselected", provenance: { source: "conversation", requestId: "req-other", turnId: "turn-other", timestamp } });
+    state.memory.session.count = 2;
+    const onExtractCandidates = vi.fn().mockResolvedValue({
+      batchId: "candidate-batch-1", requestId: "review-1", sessionId: state.sessionId, ephemeral: true, createdAt: timestamp, expiresAt: "2026-07-14T10:15:00.000Z", excluded: [],
+      candidates: [{ id: "candidate-1", batchId: "candidate-batch-1", reviewRequestId: "review-1", ephemeral: true, key: "preference_concise_updates", value: "concise updates", category: "preference", source: { sessionId: state.sessionId, sessionRecordId: "session-turn", requestId: "req-test", timestamp, userText: "What changed?" } }],
+    });
+    render(<MemoryPage state={state} onAdd={vi.fn()} onDelete={vi.fn()} onExtractCandidates={onExtractCandidates} />);
+    await user.click(screen.getByRole("tab", { name: /Session/ }));
+    expect(screen.getByRole("button", { name: "Extract candidates" })).toBeDisabled();
+    expect(screen.getByText(/reads only the selected user requests—not responses, tools, Knowledge, history, handoffs, or files/)).toBeVisible();
+    await user.click(screen.getByLabelText("Select request: What changed?"));
+    await user.click(screen.getByRole("button", { name: "Extract candidates" }));
+    expect(onExtractCandidates).toHaveBeenCalledWith(["session-turn"]);
+    expect(await screen.findByDisplayValue("concise updates")).toBeVisible();
+    expect(screen.getByText(/Nothing is durable until you accept it/)).toBeVisible();
+    expect(screen.queryByRole("button", { name: /accept all/i })).not.toBeInTheDocument();
+  });
+
+  it("requires independent accept, edit, and reject decisions and blocks existing-key replacement", async () => {
+    const user = userEvent.setup();
+    const onExtractCandidates = vi.fn().mockResolvedValue({
+      batchId: "candidate-batch-1", requestId: "review-1", sessionId: "session-test", ephemeral: true, createdAt: timestamp, expiresAt: "2026-07-14T10:15:00.000Z", excluded: [],
+      candidates: [
+        { id: "candidate-new", batchId: "candidate-batch-1", reviewRequestId: "review-1", ephemeral: true, key: "preferred_updates", value: "concise", category: "preference", source: { sessionId: "session-test", sessionRecordId: "session-turn", timestamp, userText: "What changed?" } },
+        { id: "candidate-conflict", batchId: "candidate-batch-1", reviewRequestId: "review-1", ephemeral: true, key: "theme", value: "cave", category: "preference", source: { sessionId: "session-test", sessionRecordId: "session-turn", timestamp, userText: "What changed?" }, conflict: { type: "existing_key", record: profileFact } },
+      ],
+    });
+    const onAcceptCandidate = vi.fn().mockResolvedValue(true);
+    const onRejectCandidate = vi.fn().mockResolvedValue(true);
+    render(<MemoryPage state={dashboardState()} onAdd={vi.fn()} onDelete={vi.fn()} onExtractCandidates={onExtractCandidates} onAcceptCandidate={onAcceptCandidate} onRejectCandidate={onRejectCandidate} />);
+    await user.click(screen.getByRole("tab", { name: /Session/ }));
+    await user.click(screen.getByLabelText("Select request: What changed?"));
+    await user.click(screen.getByRole("button", { name: "Extract candidates" }));
+    const keyInputs = await screen.findAllByLabelText("Candidate key");
+    await user.clear(keyInputs[0]!);
+    await user.type(keyInputs[0]!, "preferred_status_updates");
+    await user.click(screen.getAllByRole("button", { name: "Accept and save" })[0]!);
+    expect(onAcceptCandidate).toHaveBeenCalledWith("candidate-batch-1", "candidate-new", { key: "preferred_status_updates", value: "concise", category: "preference" });
+    expect(await screen.findByText(/Reviewed candidate saved/)).toBeVisible();
+
+    const conflictAccept = screen.getByRole("button", { name: "Accept and save" });
+    expect(conflictAccept).toBeDisabled();
+    const remainingKey = screen.getByLabelText("Candidate key");
+    await user.clear(remainingKey);
+    await user.type(remainingKey, "preferred_visual_theme");
+    expect(conflictAccept).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Reject" }));
+    expect(onRejectCandidate).toHaveBeenCalledWith("candidate-batch-1", "candidate-conflict");
+    expect(onAcceptCandidate).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears unaccepted candidates with session memory and does not let auto-confirm change review", async () => {
+    const user = userEvent.setup();
+    const state = dashboardState();
+    state.autoConfirm = true;
+    const onExtractCandidates = vi.fn().mockResolvedValue({
+      batchId: "candidate-batch-1", requestId: "review-1", sessionId: state.sessionId, ephemeral: true, createdAt: timestamp, expiresAt: "2026-07-14T10:15:00.000Z", excluded: [],
+      candidates: [{ id: "candidate-1", batchId: "candidate-batch-1", reviewRequestId: "review-1", ephemeral: true, key: "preferred_updates", value: "concise", category: "preference", source: { sessionId: state.sessionId, sessionRecordId: "session-turn", timestamp, userText: "What changed?" } }],
+    });
+    const onAcceptCandidate = vi.fn();
+    const onClearSession = vi.fn().mockResolvedValue(true);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MemoryPage state={state} onAdd={vi.fn()} onDelete={vi.fn()} onClearSession={onClearSession} onExtractCandidates={onExtractCandidates} onAcceptCandidate={onAcceptCandidate} onRejectCandidate={vi.fn()} />);
+    await user.click(screen.getByRole("tab", { name: /Session/ }));
+    await user.click(screen.getByLabelText("Select request: What changed?"));
+    await user.click(screen.getByRole("button", { name: "Extract candidates" }));
+    expect(await screen.findByRole("button", { name: "Accept and save" })).toBeEnabled();
+    expect(onAcceptCandidate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Clear working memory" }));
+    expect(screen.queryByRole("button", { name: "Accept and save" })).not.toBeInTheDocument();
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringMatching(/unaccepted memory candidates/));
+  });
+
+  it("ignores an extraction response that resolves after session clearing", async () => {
+    const user = userEvent.setup();
+    let resolveExtraction!: (batch: any) => void;
+    const pendingExtraction = new Promise<any>((resolve) => { resolveExtraction = resolve; });
+    const onExtractCandidates = vi.fn().mockReturnValue(pendingExtraction);
+    const onClearSession = vi.fn().mockResolvedValue(true);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MemoryPage state={dashboardState()} onAdd={vi.fn()} onDelete={vi.fn()} onClearSession={onClearSession} onExtractCandidates={onExtractCandidates} onAcceptCandidate={vi.fn()} onRejectCandidate={vi.fn()} />);
+    await user.click(screen.getByRole("tab", { name: /Session/ }));
+    await user.click(screen.getByLabelText("Select request: What changed?"));
+    await user.click(screen.getByRole("button", { name: "Extract candidates" }));
+    await user.click(screen.getByRole("button", { name: "Clear working memory" }));
+    resolveExtraction({ batchId: "candidate-batch-stale", requestId: "review-stale", sessionId: "session-test", ephemeral: true, createdAt: timestamp, expiresAt: "2026-07-14T10:15:00.000Z", excluded: [], candidates: [{ id: "candidate-stale", batchId: "candidate-batch-stale", reviewRequestId: "review-stale", ephemeral: true, key: "preferred_updates", value: "concise", category: "preference", source: { sessionId: "session-test", sessionRecordId: "session-turn", timestamp, userText: "What changed?" } }] });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Accept and save" })).not.toBeInTheDocument());
+    expect(screen.getByText(/unaccepted candidates were cleared/)).toBeVisible();
   });
 
   it("uses valid definition-list semantics for session accounting", async () => {

@@ -77,6 +77,8 @@ export interface ProfileStore {
 		provenance?: MemoryProvenance,
 	): UserFact;
 	rememberProfileMemory(write: ProfileMemoryWrite, provenance: MemoryProvenance): UserFact;
+	/** Atomically creates reviewed memory only while its normalized key is absent. */
+	createProfileMemoryIfAbsent(write: ProfileMemoryWrite, provenance: MemoryProvenance): UserFact;
 	updateProfileMemory(id: string, patch: ProfileMemoryPatch, expectedUpdatedAt: string, provenance: MemoryProvenance): UserFact | null;
 	recallFact(key?: string): UserFact[];
 	forgetFact(key: string): boolean;
@@ -388,6 +390,33 @@ export function createProfileStore(filePath: string = DEFAULT_PROFILE_FILE): Pro
 		});
 	}
 
+	function createProfileMemoryIfAbsent(write: ProfileMemoryWrite, provenance: MemoryProvenance): UserFact {
+		return withFreshProfile((current) => {
+			const key = write.key.trim();
+			const value = write.value.trim();
+			if (!key) throw new Error("Profile memory key is required.");
+			if (!value) throw new Error("Profile memory value is required.");
+			if (current.facts.some((fact) => fact.key.trim().toLowerCase() === key.toLowerCase())) {
+				throw new ProfileMemoryConflictError(`Profile memory ${JSON.stringify(key)} already exists. Review and edit the existing fact instead.`);
+			}
+			const createdAt = normalizeProfileTimestamp(provenance.timestamp);
+			const fact: UserFact = {
+				id: stableProfileId(key, createdAt),
+				kind: "profile",
+				key,
+				value,
+				category: write.category ?? "note",
+				createdAt,
+				updatedAt: createdAt,
+				provenance: { ...provenance, timestamp: createdAt },
+				addedAt: createdAt,
+				source: provenanceSourceToLegacy(provenance.source),
+			};
+			current.facts.push(fact);
+			return fact;
+		});
+	}
+
 	function updateProfileMemory(
 		id: string,
 		patch: ProfileMemoryPatch,
@@ -512,6 +541,7 @@ export function createProfileStore(filePath: string = DEFAULT_PROFILE_FILE): Pro
 		saveProfile,
 		rememberFact,
 		rememberProfileMemory,
+		createProfileMemoryIfAbsent,
 		updateProfileMemory,
 		recallFact,
 		forgetFact,
@@ -540,6 +570,10 @@ export const rememberProfileMemory = (
 	write: ProfileMemoryWrite,
 	provenance: MemoryProvenance,
 ): UserFact => defaultProfileStore.rememberProfileMemory(write, provenance);
+export const createProfileMemoryIfAbsent = (
+	write: ProfileMemoryWrite,
+	provenance: MemoryProvenance,
+): UserFact => defaultProfileStore.createProfileMemoryIfAbsent(write, provenance);
 export const updateProfileMemory = (
 	id: string,
 	patch: ProfileMemoryPatch,

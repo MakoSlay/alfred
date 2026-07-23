@@ -121,6 +121,12 @@ export function classifyToolRisk(toolCall: AlfredToolCall): RiskClassification {
 			return classifyWriteFileRisk(toolCall);
 		case "edit_file":
 			return classifyEditFileRisk(toolCall);
+		case "save_note":
+			return { risk: "mutation", confirmation: "confirm" };
+		case "list_notes":
+		case "read_note":
+		case "open_note":
+			return { risk: "read", confirmation: "none" };
 		case "web_search":
 			return { risk: "external", confirmation: "none" };
 		case "fetch_content":

@@ -21,6 +21,11 @@ test("tool loop prompt tells the model speech is a TTS script", () => {
 	assert.match(AUTONOMOUS_SYSTEM_PROMPT, /discovery\/inspection alone is not completion/);
 	assert.doesNotMatch(AUTONOMOUS_SYSTEM_PROMPT, /Do not wait for the user to tell you to remember/);
 	assert.match(AUTONOMOUS_SYSTEM_PROMPT, /Do not store one-off task details or guesses/);
+	assert.match(AUTONOMOUS_SYSTEM_PROMPT, /prefer save_note/);
+	assert.match(AUTONOMOUS_SYSTEM_PROMPT, /separate verified facts from assumptions/);
+	assert.match(AUTONOMOUS_SYSTEM_PROMPT, /show\/check arithmetic/);
+	assert.match(AUTONOMOUS_SYSTEM_PROMPT, /scope "host" for machine-wide inspection/);
+	assert.match(AUTONOMOUS_SYSTEM_PROMPT, /local apps or system resource usage/);
 });
 
 test("working acknowledgements are contextual instead of always generic", () => {
@@ -122,6 +127,98 @@ test("legacy speech plus command JSON still executes as bash", async () => {
 	assert.equal(result.speech, "Legacy command finished, sir.");
 });
 
+test("execute-time bash guard blocks multiline, heredoc, and here-string legacy commands", async () => {
+	for (const command of ["printf one\nprintf two", "cat <<EOF > note.txt", "cat <<< value"]) {
+		let ran = false;
+		const result = await runToolLoop({
+			llmClient: createFakeLlmClient([
+				JSON.stringify({ speech: "Working, sir.", command }),
+				'{"speech":"The unsafe shell shape was blocked, sir."}',
+			]),
+			userText: "write a note",
+			systemContext: CONTEXT,
+			requestId: "req-legacy-shape",
+			sessionId: "sess-legacy-shape",
+			executeBash: async () => { ran = true; return { ok: true, stdout: "", stderr: "", exitCode: 0 }; },
+		});
+		assert.equal(ran, false);
+		assert.match(result.displayText, /single line|heredoc/i);
+	}
+});
+
+test("confirmation preserves an originally absent cwd instead of adopting approval-turn context", async () => {
+	const confirmationStore = new PendingConfirmationStore();
+	let ran = false;
+	const pending = await runToolLoop({
+		llmClient: createFakeLlmClient(['{"tool":"bash","command":"mkdir approved-dir"}']),
+		userText: "make a directory",
+		systemContext: "No cmux workspace is available.",
+		requestId: "req-no-cwd-1",
+		sessionId: "sess-no-cwd",
+		confirmationStore,
+		executeBash: async () => { ran = true; return { ok: true, stdout: "", stderr: "", exitCode: 0 }; },
+	});
+	assert.equal(pending.requiresConfirmation, true);
+	assert.doesNotMatch(pending.displayText, /Cwd:/);
+	const completed = await runToolLoop({
+		llmClient: { complete: async () => { throw new Error("planner must not run after confirmation"); } },
+		userText: "yes",
+		systemContext: CONTEXT,
+		requestId: "req-no-cwd-2",
+		sessionId: "sess-no-cwd",
+		confirmationStore,
+		confirm: true,
+		confirmationId: pending.confirmationId,
+		executeBash: async () => { ran = true; return { ok: true, stdout: "", stderr: "", exitCode: 0 }; },
+	});
+	assert.equal(ran, false);
+	assert.match(completed.displayText, /No safe cmux workspace cwd/);
+});
+
+test("confirmation continuation preserves the original request tail and workspace for follow-on steps", async () => {
+	const confirmationStore = new PendingConfirmationStore();
+	const originalContext = `WORKSPACES (1):\n  Original [current] | ref:workspace:original | /tmp/original | branch: main (clean)\n\n${"state ".repeat(6_000)}`;
+	const driftedContext = `WORKSPACES (1):\n  Drifted [current] | ref:workspace:drifted | /tmp/drifted | branch: main (clean)`;
+	const marker = "ORIGINAL REQUEST MARKER: create the directory and then verify it";
+	const pending = await runToolLoop({
+		llmClient: createFakeLlmClient(['{"tool":"bash","command":"mkdir approved-dir"}']),
+		userText: marker,
+		systemContext: originalContext,
+		requestId: "req-continuation-1",
+		sessionId: "sess-continuation",
+		confirmationStore,
+	});
+	const calls: Array<{ command: string; cwd: string }> = [];
+	let plannerCalls = 0;
+	const completed = await runToolLoop({
+		llmClient: { complete: async (request) => {
+			plannerCalls++;
+			if (plannerCalls === 1) {
+				assert.match(request.messages.map((message) => message.content).join("\n"), new RegExp(marker));
+				assert.match(request.messages.map((message) => message.content).join("\n"), /APPROVED TASK CONTINUATION/);
+				return { text: '{"tool":"bash","command":"echo verified"}' };
+			}
+			return { text: '{"speech":"The directory was created and verified, sir."}' };
+		} },
+		userText: "yes",
+		systemContext: driftedContext,
+		requestId: "req-continuation-2",
+		sessionId: "sess-continuation",
+		confirmationStore,
+		confirm: true,
+		confirmationId: pending.confirmationId,
+		executeBash: async (command, options) => {
+			calls.push({ command, cwd: options.cwd });
+			return { ok: true, stdout: "ok", stderr: "", exitCode: 0 };
+		},
+	});
+	assert.equal(completed.speech, "The directory was created and verified, sir.");
+	assert.deepEqual(calls, [
+		{ command: "mkdir approved-dir", cwd: "/tmp/original" },
+		{ command: "echo verified", cwd: "/tmp/original" },
+	]);
+});
+
 test("unknown tool triggers one parser retry then graceful failure", async () => {
 	const result = await runToolLoop({
 		llmClient: createFakeLlmClient([
@@ -170,6 +267,49 @@ test("bash never falls back to Alfred repo when cmux cwd is unavailable", async 
 	assert.equal(ran, false);
 	assert.equal(result.toolResults[0]?.success, false);
 	assert.match(result.toolResults[0]?.text ?? "", /will not fall back/);
+});
+
+test("host-scoped bash inspects macOS without cmux and runs from a neutral cwd", async () => {
+	const command = "osascript -e 'tell application \"System Events\" to get name of every visible process'";
+	const calls: Array<{ command: string; cwd: string }> = [];
+	const result = await runToolLoop({
+		llmClient: createFakeLlmClient([
+			JSON.stringify({ tool: "bash", command, scope: "host" }),
+			'{"speech":"You have several visible apps, sir."}',
+		]),
+		userText: "how many apps do I have open?",
+		systemContext: "WORKSPACES: (cmux unavailable)",
+		requestId: "req-host-apps",
+		sessionId: "sess-host-apps",
+		executeBash: async (actualCommand, options) => {
+			calls.push({ command: actualCommand, cwd: options.cwd });
+			return { ok: true, stdout: "Finder, Calendar, Messages", stderr: "", exitCode: 0 };
+		},
+	});
+	assert.deepEqual(calls, [{ command, cwd: tmpdir() }]);
+	assert.equal(result.executed, true);
+	assert.equal(result.toolResults[0]?.success, true);
+	assert.equal(result.toolResults[0]?.workspaceRef, undefined);
+	assert.equal(result.toolResults[0]?.cwd, tmpdir());
+});
+
+test("tool loop rejects host scope combined with a cwd", async () => {
+	let ran = false;
+	const invalid = JSON.stringify({ tool: "bash", command: "pwd", scope: "host", cwd: "/tmp/project" });
+	const result = await runToolLoop({
+		llmClient: createFakeLlmClient([invalid, invalid]),
+		userText: "inspect the host",
+		systemContext: "WORKSPACES: (cmux unavailable)",
+		requestId: "req-host-invalid",
+		sessionId: "sess-host-invalid",
+		executeBash: async () => {
+			ran = true;
+			return { ok: true, stdout: "", stderr: "", exitCode: 0 };
+		},
+	});
+	assert.equal(ran, false);
+	assert.equal(result.parserRetries, 1);
+	assert.equal(result.outcome.terminalFailure?.code, "parser.invalid_tool_arguments");
 });
 
 test("fuzzy workspace correction resolves Maine to Main when unambiguous", async () => {
@@ -334,7 +474,7 @@ test("one confirmation authorizes only the stored schedule payload", async () =>
 		assert.equal(pending.requiresConfirmation, true);
 
 		const followOn = await runToolLoop({
-			llmClient: createFakeLlmClient(['{"tool":"schedule_job","kind":"reminder","title":"Unapproved follow-on","runAt":"2026-07-16T16:00:00Z"}']),
+			llmClient: { complete: async () => { throw new Error("approval must not be replanned"); } },
 			userText: "Approve only the pending reminder",
 			systemContext: CONTEXT,
 			requestId: "req-schedule-once-2",
@@ -345,8 +485,10 @@ test("one confirmation authorizes only the stored schedule payload", async () =>
 			confirmationId: pending.confirmationId,
 		});
 		assert.deepEqual(goalJobStore.listJobs().map((job) => job.title), ["Approved"]);
-		assert.equal(followOn.requiresConfirmation, true);
-		assert.equal(confirmationStore.count(), 1);
+		assert.equal(followOn.requiresConfirmation, false);
+		assert.equal(followOn.deterministicCompletion, true);
+		assert.match(followOn.displayText, /Scheduled job/);
+		assert.equal(confirmationStore.count(), 0);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}

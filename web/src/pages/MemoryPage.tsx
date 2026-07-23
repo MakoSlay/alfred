@@ -1,13 +1,15 @@
-import { useMemo, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent } from "react";
 import type {
   BaseMemoryRecord,
   DashboardState,
   KnowledgeImportRequest,
   KnowledgeSearchMatch,
+  MemoryCandidateBatch,
   MemoryKind,
   MemoryProvenance,
   MemoryRecallResponse,
   ProfileFact,
+  ReviewedMemoryCandidate,
 } from "../api/types";
 
 type MemoryTab = "profile" | "session" | "knowledge";
@@ -56,13 +58,16 @@ function MemoryMetadata({ record, indexedAt }: { record: BaseMemoryRecord; index
   );
 }
 
-export function MemoryPage({ state, onAdd, onUpdate, onDelete, onClearSession, onRecall, onImportKnowledge, onDeleteKnowledge, onReindexKnowledge, onSearchKnowledge }: {
+export function MemoryPage({ state, onAdd, onUpdate, onDelete, onClearSession, onRecall, onExtractCandidates, onAcceptCandidate, onRejectCandidate, onImportKnowledge, onDeleteKnowledge, onReindexKnowledge, onSearchKnowledge }: {
   state: DashboardState;
   onAdd: (fact: Pick<ProfileFact, "key" | "value" | "category">) => Promise<boolean>;
   onUpdate?: (id: string, fact: Pick<ProfileFact, "key" | "value" | "category">, expectedUpdatedAt: string) => Promise<boolean>;
   onDelete: (id: string) => Promise<boolean>;
   onClearSession?: () => Promise<boolean>;
   onRecall?: (query: string, kinds: MemoryKind[]) => Promise<MemoryRecallResponse>;
+  onExtractCandidates?: (turnIds: string[]) => Promise<MemoryCandidateBatch>;
+  onAcceptCandidate?: (batchId: string, candidateId: string, write: Pick<ReviewedMemoryCandidate, "key" | "value" | "category">) => Promise<boolean>;
+  onRejectCandidate?: (batchId: string, candidateId: string) => Promise<boolean>;
   onImportKnowledge?: (input: KnowledgeImportRequest) => Promise<boolean>;
   onDeleteKnowledge?: (id: string) => Promise<boolean>;
   onReindexKnowledge?: (id: string) => Promise<boolean>;
@@ -79,6 +84,12 @@ export function MemoryPage({ state, onAdd, onUpdate, onDelete, onClearSession, o
   const [profileStatus, setProfileStatus] = useState("");
   const [clearingSession, setClearingSession] = useState(false);
   const [sessionStatus, setSessionStatus] = useState("");
+  const [selectedTurnIds, setSelectedTurnIds] = useState<Set<string>>(() => new Set());
+  const [candidateBatch, setCandidateBatch] = useState<MemoryCandidateBatch | null>(null);
+  const [candidateDrafts, setCandidateDrafts] = useState<Record<string, Pick<ReviewedMemoryCandidate, "key" | "value" | "category">>>({});
+  const [candidateBusy, setCandidateBusy] = useState<string | null>(null);
+  const [candidateStatus, setCandidateStatus] = useState("Select current-session requests to review. Nothing is saved during extraction.");
+  const candidateSequence = useRef(0);
   const [recallQuery, setRecallQuery] = useState("");
   const [recallKinds, setRecallKinds] = useState<Record<MemoryKind, boolean>>({ profile: true, session: true, knowledge: true });
   const [recallResult, setRecallResult] = useState<MemoryRecallResponse | null>(null);
@@ -100,6 +111,21 @@ export function MemoryPage({ state, onAdd, onUpdate, onDelete, onClearSession, o
     const query = filter.trim().toLowerCase();
     return !query ? profile.records : profile.records.filter((fact) => `${fact.key} ${fact.value} ${fact.category} ${fact.provenance.source}`.toLowerCase().includes(query));
   }, [filter, profile.records]);
+
+  useEffect(() => {
+    const available = new Set(session.records.map((turn) => turn.id));
+    const retained = new Set([...selectedTurnIds].filter((id) => available.has(id)));
+    const sourceRemoved = retained.size !== selectedTurnIds.size;
+    const candidateRemoved = Boolean(candidateBatch && !candidateBatch.candidates.every((candidate) => available.has(candidate.source.sessionRecordId)));
+    if (sourceRemoved || candidateRemoved) {
+      candidateSequence.current += 1;
+      setCandidateBusy(null);
+      setCandidateDrafts({});
+      setCandidateStatus("Session memory changed. Select current requests and extract fresh candidates.");
+    }
+    if (sourceRemoved) setSelectedTurnIds(retained);
+    if (candidateRemoved) setCandidateBatch(null);
+  }, [candidateBatch, selectedTurnIds, session.records]);
 
   function selectTab(tab: MemoryTab, focus = false) {
     setActiveTab(tab);
@@ -174,13 +200,87 @@ export function MemoryPage({ state, onAdd, onUpdate, onDelete, onClearSession, o
     }
   }
 
+  function toggleTurnSelection(id: string, checked: boolean) {
+    setSelectedTurnIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(id); else next.delete(id);
+      return next;
+    });
+  }
+
+  async function extractCandidates() {
+    if (!onExtractCandidates || selectedTurnIds.size === 0) return;
+    const sequence = ++candidateSequence.current;
+    setCandidateBusy("extract");
+    setCandidateStatus("Extracting ephemeral candidates from selected user requests…");
+    try {
+      const batch = await onExtractCandidates([...selectedTurnIds]);
+      if (sequence !== candidateSequence.current) return;
+      setCandidateBatch(batch);
+      setCandidateDrafts(Object.fromEntries(batch.candidates.map((candidate) => [candidate.id, { key: candidate.key, value: candidate.value, category: candidate.category }])));
+      const excluded = batch.excluded.length ? ` ${batch.excluded.length} selected request${batch.excluded.length === 1 ? " was" : "s were"} excluded by the eligibility or safety policy.` : "";
+      setCandidateStatus(batch.candidates.length
+        ? `Review ${batch.candidates.length} candidate${batch.candidates.length === 1 ? "" : "s"} individually. Nothing is durable until you accept it.${excluded}`
+        : `No eligible preference or identity facts were found. Nothing was saved.${excluded}`);
+    } catch (cause) {
+      if (sequence === candidateSequence.current) setCandidateStatus(cause instanceof Error ? `Extraction failed: ${cause.message}` : "Extraction failed.");
+    } finally {
+      if (sequence === candidateSequence.current) setCandidateBusy(null);
+    }
+  }
+
+  function updateCandidateDraft(id: string, patch: Partial<Pick<ReviewedMemoryCandidate, "key" | "value" | "category">>) {
+    setCandidateDrafts((current) => ({ ...current, [id]: { ...current[id]!, ...patch } }));
+  }
+
+  async function resolveCandidate(candidate: ReviewedMemoryCandidate, decision: "accept" | "reject") {
+    if (!candidateBatch) return;
+    const operation = `${decision}:${candidate.id}`;
+    setCandidateBusy(operation);
+    setCandidateStatus(decision === "accept" ? `Saving reviewed candidate ${candidate.key}…` : `Rejecting candidate ${candidate.key}…`);
+    try {
+      const changed = decision === "accept"
+        ? await onAcceptCandidate?.(candidateBatch.batchId, candidate.id, candidateDrafts[candidate.id] ?? candidate)
+        : await onRejectCandidate?.(candidateBatch.batchId, candidate.id);
+      if (!changed) {
+        setCandidateStatus(decision === "accept" ? "Candidate was not saved. Review the conflict or edits and try again." : "Candidate was not rejected.");
+        return;
+      }
+      const remaining = candidateBatch.candidates.filter((item) => item.id !== candidate.id);
+      setCandidateBatch(remaining.length ? { ...candidateBatch, candidates: remaining } : null);
+      setCandidateDrafts((current) => { const next = { ...current }; delete next[candidate.id]; return next; });
+      setCandidateStatus(decision === "accept" ? "Reviewed candidate saved to Profile memory." : "Candidate rejected. Nothing was saved.");
+      window.requestAnimationFrame(() => {
+        const next = remaining[0] ? document.getElementById(`candidate-key-${remaining[0].id}`) : document.getElementById("extract-memory-candidates");
+        next?.focus();
+      });
+    } finally {
+      setCandidateBusy(null);
+    }
+  }
+
+  function editConflictingFact(candidate: ReviewedMemoryCandidate) {
+    const existing = candidate.conflict?.record;
+    if (!existing) return;
+    beginEdit(existing);
+    selectTab("profile");
+  }
+
   async function clearWorkingMemory() {
-    if (!onClearSession || !window.confirm("Clear retained working-memory summaries? Token accounting, activity history, handoffs, profile facts, and Knowledge sources will remain.")) return;
+    if (!onClearSession || !window.confirm("Clear retained working-memory summaries and unaccepted memory candidates? Token accounting, activity history, handoffs, profile facts, and Knowledge sources will remain.")) return;
+    candidateSequence.current += 1;
+    setCandidateBusy(null);
     setClearingSession(true);
     setSessionStatus("Clearing retained working-memory summaries…");
     try {
       const cleared = await onClearSession();
-      setSessionStatus(cleared ? "Working-memory summaries cleared. Token accounting and durable activity history remain." : "Working memory was not cleared.");
+      if (cleared) {
+        setSelectedTurnIds(new Set());
+        setCandidateBatch(null);
+        setCandidateDrafts({});
+        setCandidateStatus("Working memory and unaccepted candidates were cleared.");
+      }
+      setSessionStatus(cleared ? "Working-memory summaries and unaccepted candidates cleared. Token accounting and durable activity history remain." : "Working memory was not cleared.");
     } finally {
       setClearingSession(false);
     }
@@ -315,14 +415,38 @@ export function MemoryPage({ state, onAdd, onUpdate, onDelete, onClearSession, o
       <div aria-labelledby="memory-tab-session" className="page-stack memory-tabpanel" hidden={activeTab !== "session"} id="memory-panel-session" role="tabpanel" tabIndex={activeTab === "session" ? 0 : -1}>
         <section className="panel section-panel">
           <div className="section-heading"><div><span className="eyebrow">Working memory</span><h2>Current session</h2></div><span className="count-badge">{session.count}</span></div>
-          <p className="memory-boundary-note"><strong>Ephemeral.</strong> Clear removes these retained summaries only. Token accounting, activity history, handoffs, profile facts, and Knowledge sources remain.</p>
+          <p className="memory-boundary-note"><strong>Ephemeral.</strong> Clear removes these retained summaries and unaccepted candidates only. Token accounting, activity history, handoffs, profile facts, and Knowledge sources remain.</p>
           <dl className="definition-list"><div><dt>Context</dt><dd>{session.currentContextTokens.toLocaleString()} tokens</dd></div><div><dt>Usage</dt><dd>{session.cumulativeTotalTokens.toLocaleString()} cumulative tokens</dd></div></dl>
           <div className="button-row"><button className="button button--danger" disabled={clearingSession || !onClearSession || session.count === 0} onClick={() => void clearWorkingMemory()} type="button">{clearingSession ? "Clearing…" : "Clear working memory"}</button></div>
           <div aria-live="polite" role="status">{sessionStatus}</div>
         </section>
+        <section className="panel section-panel" aria-labelledby="reviewed-memory-heading">
+          <div className="section-heading"><div><span className="eyebrow">Reviewed extraction</span><h2 id="reviewed-memory-heading">Suggest profile memories</h2></div><span className="count-badge">{selectedTurnIds.size} selected</span></div>
+          <p className="memory-boundary-note"><strong>Explicit review only.</strong> Alfred reads only the selected user requests—not responses, tools, Knowledge, history, handoffs, or files. Candidates are temporary, and auto-confirm cannot save them.</p>
+          <div className="button-row"><button className="button button--primary" disabled={!onExtractCandidates || selectedTurnIds.size === 0 || candidateBusy !== null} id="extract-memory-candidates" onClick={() => void extractCandidates()} type="button">{candidateBusy === "extract" ? "Extracting…" : "Extract candidates"}</button><button className="button" disabled={selectedTurnIds.size === 0 || candidateBusy !== null} onClick={() => setSelectedTurnIds(new Set())} type="button">Clear selection</button></div>
+          <div aria-busy={candidateBusy !== null} aria-live="polite" className="memory-operation-status" role="status">{candidateStatus}</div>
+          {candidateBatch?.candidates.length ? <div className="memory-candidate-list" aria-label="Ephemeral memory candidates">
+            {candidateBatch.candidates.map((candidate) => {
+              const draft = candidateDrafts[candidate.id] ?? candidate;
+              const sameConflictKey = candidate.conflict?.record.key.trim().toLowerCase() === draft.key.trim().toLowerCase();
+              return <article className="memory-candidate" key={candidate.id}>
+                <div className="section-heading"><div><span className="eyebrow">Temporary candidate</span><h3>{candidate.category === "identity" ? "Identity" : "Preference"}</h3></div><code>{candidate.id}</code></div>
+                <blockquote>{candidate.source.userText}</blockquote>
+                <p className="memory-candidate__source">Selected request <code>{candidate.source.sessionRecordId}</code> · expires <time dateTime={candidateBatch.expiresAt}>{new Date(candidateBatch.expiresAt).toLocaleTimeString()}</time></p>
+                {candidate.conflict ? <div className="memory-candidate__conflict" role="note"><strong>Existing key conflict.</strong> Profile currently stores “{candidate.conflict.record.value}”. It will not be replaced here. Edit this candidate to a new key, reject it, or edit the existing Profile fact separately.</div> : null}
+                <div className="memory-candidate__form">
+                  <label>Candidate key<input id={`candidate-key-${candidate.id}`} maxLength={80} onChange={(event) => updateCandidateDraft(candidate.id, { key: event.target.value })} pattern="[a-z][a-z0-9_]*" required value={draft.key} /></label>
+                  <label>Candidate value<input maxLength={240} onChange={(event) => updateCandidateDraft(candidate.id, { value: event.target.value })} required value={draft.value} /></label>
+                  <label>Category<select onChange={(event) => updateCandidateDraft(candidate.id, { category: event.target.value as ReviewedMemoryCandidate["category"] })} value={draft.category}><option value="preference">Preference</option><option value="identity">Identity</option></select></label>
+                </div>
+                <div className="button-row"><button className="button button--primary" disabled={!onAcceptCandidate || candidateBusy !== null || sameConflictKey || !draft.key.trim() || !draft.value.trim()} onClick={() => void resolveCandidate(candidate, "accept")} type="button">{candidateBusy === `accept:${candidate.id}` ? "Saving…" : "Accept and save"}</button><button className="button" disabled={!onRejectCandidate || candidateBusy !== null} onClick={() => void resolveCandidate(candidate, "reject")} type="button">{candidateBusy === `reject:${candidate.id}` ? "Rejecting…" : "Reject"}</button>{candidate.conflict ? <button className="button" disabled={candidateBusy !== null} onClick={() => editConflictingFact(candidate)} type="button">Edit existing {candidate.conflict.record.key}</button> : null}</div>
+              </article>;
+            })}
+          </div> : null}
+        </section>
         <section className="panel section-panel">
-          <div className="table-wrap"><table><thead><tr><th>Request</th><th>Response</th><th>Tools</th><th>Outcome</th><th>Details</th></tr></thead><tbody>
-            {session.records.length === 0 ? <tr><td className="empty-state" colSpan={5}>No working-memory turns in this process yet.</td></tr> : session.records.slice().reverse().map((turn) => <tr key={turn.id}><td>{turn.userText}</td><td>{turn.finalSpeech}</td><td>{turn.toolsUsed.length ? turn.toolsUsed.join(", ") : "—"}</td><td>{turn.shortOutcome || "—"}</td><td><MemoryMetadata record={turn} /></td></tr>)}
+          <div className="table-wrap"><table><thead><tr><th><span className="sr-only">Select for reviewed extraction</span></th><th>Request</th><th>Response</th><th>Tools</th><th>Outcome</th><th>Details</th></tr></thead><tbody>
+            {session.records.length === 0 ? <tr><td className="empty-state" colSpan={6}>No working-memory turns in this process yet.</td></tr> : session.records.slice().reverse().map((turn) => <tr key={turn.id}><td><input aria-label={`Select request: ${turn.userText}`} checked={selectedTurnIds.has(turn.id)} disabled={!selectedTurnIds.has(turn.id) && selectedTurnIds.size >= 10} onChange={(event) => toggleTurnSelection(turn.id, event.target.checked)} type="checkbox" /></td><td>{turn.userText}</td><td>{turn.finalSpeech}</td><td>{turn.toolsUsed.length ? turn.toolsUsed.join(", ") : "—"}</td><td>{turn.shortOutcome || "—"}</td><td><MemoryMetadata record={turn} /></td></tr>)}
           </tbody></table></div>
         </section>
       </div>

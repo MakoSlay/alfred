@@ -230,9 +230,7 @@ test("tool loop confirmation-gates and then executes send_session_message", asyn
 	assert.ok(phase1.confirmationId);
 
 	const phase2 = await runToolLoop({
-		llmClient: createFakeLlmClient([
-			'{"speech":"Drafted that message, sir."}',
-		]),
+		llmClient: { complete: async () => { throw new Error("planner must not run after explicit confirmation"); } },
 		userText: "confirm",
 		systemContext: CONTEXT,
 		requestId: "req-send-phase2",
@@ -244,7 +242,9 @@ test("tool loop confirmation-gates and then executes send_session_message", asyn
 	});
 
 	assert.equal(phase2.requiresConfirmation, false);
+	assert.equal(phase2.deterministicCompletion, true);
 	assert.equal(phase2.toolResults[0]?.tool, "send_session_message");
+	assert.match(phase2.displayText, /Drafted message to Collectors Survey \/ shell/);
 	assert.deepEqual(calls.at(-1), ["send", "--workspace", "workspace:11", "--surface", "surface:30", "On it."]);
 });
 
@@ -276,7 +276,6 @@ test("tool loop resolves natural-language confirmation intent before normal plan
 	const phase2 = await runToolLoop({
 		llmClient: createFakeLlmClient([
 			'{"intent":"approve","confidence":0.94,"reason":"The user approved the pending action."}',
-			'{"speech":"Drafted that message, sir."}',
 		]),
 		userText: "Yuss, go ahead and do that",
 		systemContext: CONTEXT,
@@ -287,8 +286,33 @@ test("tool loop resolves natural-language confirmation intent before normal plan
 	});
 
 	assert.equal(phase2.requiresConfirmation, false);
+	assert.equal(phase2.deterministicCompletion, true);
 	assert.equal(phase2.toolResults[0]?.tool, "send_session_message");
 	assert.deepEqual(calls.at(-1), ["send", "--workspace", "workspace:11", "--surface", "surface:30", "On it."]);
+});
+
+test("requesting a confirmation modification cancels the stale stored action", async () => {
+	const confirmationStore = new PendingConfirmationStore<AlfredToolCall>();
+	const pending = await runToolLoop({
+		llmClient: createFakeLlmClient(['{"tool":"send_session_message","workspaceName":"Collectors Survey","tabHint":"shell","text":"On it.","mode":"send"}']),
+		userText: "send a message",
+		systemContext: CONTEXT,
+		requestId: "req-modify-1",
+		sessionId: "sess-modify",
+		confirmationStore,
+	});
+	assert.equal(pending.requiresConfirmation, true);
+	const modified = await runToolLoop({
+		llmClient: { complete: async () => { throw new Error("planner must not run while cancelling the old approval"); } },
+		userText: "draft only instead",
+		systemContext: CONTEXT,
+		requestId: "req-modify-2",
+		sessionId: "sess-modify",
+		confirmationStore,
+	});
+	assert.equal(modified.outcome.status, "needs_user_input");
+	assert.match(modified.displayText, /Cancelled pending action/);
+	assert.equal(confirmationStore.count(), 0);
 });
 
 test("destructive session monitor confirmation uses natural speech and readable details", async () => {

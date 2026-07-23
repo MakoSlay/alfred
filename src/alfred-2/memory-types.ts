@@ -13,6 +13,14 @@ export interface MemoryProvenance {
 	timestamp: string;
 	/** Optional normalized confidence from 0 to 1. */
 	confidence?: number;
+	/** Explicit review workflow metadata; sourceId/requestId/turnId still identify the source turn. */
+	review?: {
+		batchId: string;
+		candidateId: string;
+		requestId: string;
+		sessionId: string;
+		sessionRecordId: string;
+	};
 }
 
 export interface BaseMemoryRecord {
@@ -24,6 +32,7 @@ export interface BaseMemoryRecord {
 }
 
 export type ProfileMemoryCategory = "preference" | "identity" | "context" | "note";
+export type ReviewedMemoryCategory = Extract<ProfileMemoryCategory, "preference" | "identity">;
 
 export interface ProfileMemoryRecord extends BaseMemoryRecord {
 	kind: "profile";
@@ -96,6 +105,43 @@ export interface KnowledgeSearchMatch {
 export type KnowledgeCitation = KnowledgeSearchMatch;
 
 export type MemoryRecord = ProfileMemoryRecord | SessionMemoryRecord | KnowledgeSourceRecord;
+
+/** A request-scoped suggestion derived only from explicitly selected session user text. */
+export interface ReviewedMemoryCandidate {
+	id: string;
+	batchId: string;
+	reviewRequestId: string;
+	ephemeral: true;
+	key: string;
+	value: string;
+	category: ReviewedMemoryCategory;
+	source: {
+		sessionId: string;
+		sessionRecordId: string;
+		requestId?: string;
+		turnId?: string;
+		timestamp: string;
+		/** Bounded, exact filtered evidence from the selected user-authored request only. */
+		userText: string;
+	};
+	conflict?: {
+		type: "existing_key";
+		record: ProfileMemoryRecord;
+	};
+}
+
+export type MemoryCandidateExclusionReason = "secret_or_sensitive" | "no_supported_fact";
+
+export interface MemoryCandidateBatch {
+	batchId: string;
+	requestId: string;
+	sessionId: string;
+	ephemeral: true;
+	createdAt: string;
+	expiresAt: string;
+	candidates: ReviewedMemoryCandidate[];
+	excluded: Array<{ turnId: string; reason: MemoryCandidateExclusionReason }>;
+}
 
 export interface ProfileMemoryRecallResult {
 	kind: "profile";
@@ -197,5 +243,16 @@ function isMemoryProvenance(value: unknown): value is MemoryProvenance {
 		&& (provenance.requestId === undefined || typeof provenance.requestId === "string")
 		&& (provenance.turnId === undefined || typeof provenance.turnId === "string")
 		&& (provenance.confidence === undefined
-			|| (typeof provenance.confidence === "number" && Number.isFinite(provenance.confidence) && provenance.confidence >= 0 && provenance.confidence <= 1));
+			|| (typeof provenance.confidence === "number" && Number.isFinite(provenance.confidence) && provenance.confidence >= 0 && provenance.confidence <= 1))
+		&& (provenance.review === undefined || isMemoryReviewProvenance(provenance.review));
+}
+
+function isMemoryReviewProvenance(value: unknown): boolean {
+	if (!value || typeof value !== "object") return false;
+	const review = value as Record<string, unknown>;
+	return typeof review.batchId === "string"
+		&& typeof review.candidateId === "string"
+		&& typeof review.requestId === "string"
+		&& typeof review.sessionId === "string"
+		&& typeof review.sessionRecordId === "string";
 }

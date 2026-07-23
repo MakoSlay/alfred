@@ -1,6 +1,8 @@
 import { ALFRED_TOOL_NAMES, isRegisteredToolName, type AlfredFinalSpeech, type AlfredToolCall, type AlfredToolName, type ToolRiskLevel } from "./tool-types.ts";
 import type { FailureCode } from "./capabilities/failure-codes.ts";
 import { MAX_RECURRENCE_MINUTES, MIN_RECURRENCE_MINUTES, parseScheduledTimestamp, validRecurrenceMinutes, validWorkReviewTargetRefs } from "./goals.ts";
+import { validateBashCommandShape } from "./bash-command.ts";
+import { isWellFormedNoteContent, MAX_NOTE_BYTES, resolveNotePath } from "./tools/note.ts";
 
 export interface ParserDiagnostics {
 	rawLength: number;
@@ -166,8 +168,11 @@ function validateToolCall(obj: Record<string, unknown>, tool: AlfredToolName): V
 	let error: string | null = null;
 	switch (tool) {
 		case "bash":
-			error = rejectExtra(["command"]);
+			error = rejectExtra(["command", "scope"]);
 			if (!error) error = requireString("command");
+			if (!error && obj.scope !== undefined && obj.scope !== "workspace" && obj.scope !== "host") error = "bash scope must be workspace or host";
+			if (!error && obj.scope === "host" && (obj.cwd !== undefined || obj.workspaceRef !== undefined)) error = "host-scoped bash cannot set cwd or workspaceRef";
+			if (!error) error = validateBashCommandShape(String(obj.command));
 			break;
 		case "read_file":
 			error = rejectExtra(["path"]);
@@ -183,6 +188,39 @@ function validateToolCall(obj: Record<string, unknown>, tool: AlfredToolName): V
 			if (!error) error = requireString("path");
 			if (!error && typeof obj.oldText !== "string") error = "edit_file requires string field: oldText";
 			if (!error && typeof obj.newText !== "string") error = "edit_file requires string field: newText";
+			break;
+		case "save_note":
+			error = rejectExtra(["filename", "content", "open", "overwrite"]);
+			if (!error && (obj.cwd !== undefined || obj.workspaceRef !== undefined)) error = "save_note cannot override cwd or workspaceRef";
+			if (!error) error = requireString("filename");
+			if (!error && typeof obj.content !== "string") error = "save_note requires string field: content";
+			if (!error && typeof obj.content === "string" && !isWellFormedNoteContent(obj.content)) error = "save_note content contains an unpaired Unicode surrogate";
+			if (!error && typeof obj.content === "string" && Buffer.byteLength(obj.content, "utf8") > MAX_NOTE_BYTES) error = `save_note content exceeds the ${MAX_NOTE_BYTES}-byte limit`;
+			if (!error && obj.open !== undefined && typeof obj.open !== "boolean") error = "open must be boolean when provided";
+			if (!error && obj.overwrite !== undefined && typeof obj.overwrite !== "boolean") error = "overwrite must be boolean when provided";
+			if (!error) {
+				try { resolveNotePath(String(obj.filename), "/alfred-notes"); } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
+			}
+			break;
+		case "list_notes":
+			error = rejectExtra([]);
+			if (!error && (obj.cwd !== undefined || obj.workspaceRef !== undefined)) error = "list_notes cannot override cwd or workspaceRef";
+			break;
+		case "read_note":
+			error = rejectExtra(["filename"]);
+			if (!error && (obj.cwd !== undefined || obj.workspaceRef !== undefined)) error = "read_note cannot override cwd or workspaceRef";
+			if (!error) error = requireString("filename");
+			if (!error) {
+				try { resolveNotePath(String(obj.filename), "/alfred-notes"); } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
+			}
+			break;
+		case "open_note":
+			error = rejectExtra(["filename"]);
+			if (!error && (obj.cwd !== undefined || obj.workspaceRef !== undefined)) error = "open_note cannot override cwd or workspaceRef";
+			if (!error && obj.filename !== undefined && typeof obj.filename !== "string") error = "filename must be a string when provided";
+			if (!error && typeof obj.filename === "string") {
+				try { resolveNotePath(obj.filename, "/alfred-notes"); } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
+			}
 			break;
 		case "web_search":
 			error = rejectExtra(["query", "numResults"]);

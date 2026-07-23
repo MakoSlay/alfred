@@ -614,7 +614,7 @@ Alfred should use this before guessing when the user asks about stored docs/proj
 
 ## Phase 6 — Memory Cleanup Beyond Knowledge
 
-**Status: Phase 6A lifecycle/control parity implemented on 2026-07-20.** Profile memory now has stable-ID, revision-checked editing and canonical deletion; retained session summaries can be cleared without resetting accounting or implying activity-history/handoff erasure; unified grouped recall spans Profile, Session, and Knowledge while keeping Knowledge citations request-scoped; and the dashboard visibly exposes provenance, timestamps, retention boundaries, and deletion consequences. Reviewed conversation extraction, contradiction/outdated-fact policy, supersession history, and automatic durable writes remain deliberately deferred pending an explicit review/conflict contract.
+**Status: Phase 6B reviewed extraction implemented on 2026-07-20.** Phase 6A lifecycle/control parity remains: stable-ID revision-checked Profile editing/deletion, turn-only Session clearing, grouped recall, request-scoped Knowledge citations, and visible provenance/retention boundaries. Phase 6B adds explicitly selected current-session user-text extraction into bounded ephemeral preference/identity candidates, per-candidate accept/edit/reject, atomic create-only conflict protection, secret/sensitive filtering, and typed review provenance. Background extraction, auto-accept, silent durable writes, and persisted supersession history remain prohibited.
 
 ### Goal
 
@@ -663,15 +663,18 @@ Alfred can show:
 - explicit, conflict-safe profile editing
 - turn-only working-memory clearing that retains accounting, activity history, and handoffs
 
-### Deferred Phase 6B Decisions
+### Phase 6B Done
 
-- Explicitly invoked, reviewed conversation-to-profile extraction (proposal only until per-item acceptance)
-- Key/entity conflict and case/alias policy
-- Manual-versus-conversation precedence and optimistic acceptance behavior
-- Outdated-fact/supersession representation and deletion semantics
-- Sensitive-category eligibility, candidate retention, and confidence semantics
+- Extraction is invoked only from explicitly selected current-session user requests; there is no background or per-turn trigger.
+- Deterministic candidates cover narrow stable preference and preferred-name statements without LLM inference.
+- Full retained user text is safety-scanned; assistant/tool output, Knowledge, history, handoffs, files, secrets, sensitive facts, and temporary task context are excluded.
+- Candidate batches are bounded, random-ID, server-session-scoped, process-only, expire after 15 minutes, and clear with Session memory.
+- Every candidate requires an individual accept/edit-and-accept/reject decision; auto-confirm and natural-language confirmation cannot resolve candidates.
+- Accepted writes atomically require a case-insensitively absent key. Existing manual or conversation facts are never replaced by extraction.
+- Existing conflicts use the separate stable-ID, revision-checked Profile editor. Rejected candidates, prior values, and supersession history are not persisted.
+- Durable provenance preserves original source identifiers and typed review batch/candidate/extraction metadata.
 
-No background extraction, auto-accept, or silent durable conversation write is approved by Phase 6A.
+No background extraction, auto-accept, silent durable conversation write, or implicit supersession is approved by Phase 6B.
 
 ---
 

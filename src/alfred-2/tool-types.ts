@@ -6,6 +6,10 @@ export const ALFRED_TOOL_NAMES = [
 	"read_file",
 	"write_file",
 	"edit_file",
+	"save_note",
+	"list_notes",
+	"read_note",
+	"open_note",
 	"web_search",
 	"fetch_content",
 	"remember",
@@ -40,10 +44,14 @@ export const ALFRED_TOOL_NAMES = [
 export type AlfredToolName = typeof ALFRED_TOOL_NAMES[number];
 
 export const ALFRED_TOOL_PROMPT_SNIPPETS: Record<AlfredToolName, string> = {
-	bash: 'bash: {"tool":"bash","command":"single-line bash command","cwd":"optional","workspaceRef":"optional","timeoutMs":30000}',
+	bash: 'bash: {"tool":"bash","command":"single-line bash command","scope":"workspace|host","cwd":"optional workspace cwd","workspaceRef":"optional","timeoutMs":30000} — scope defaults to workspace; use host only for machine-wide inspection such as macOS apps, processes, CPU, or memory, without cwd/workspaceRef',
 	read_file: 'read_file: {"tool":"read_file","path":"relative or absolute path","cwd":"optional","workspaceRef":"optional"}',
 	write_file: 'write_file: {"tool":"write_file","path":"...","content":"..."}',
 	edit_file: 'edit_file: {"tool":"edit_file","path":"...","oldText":"exact text to replace","newText":"replacement"}',
+	save_note: 'save_note: {"tool":"save_note","filename":"copyable-note.md","content":"full UTF-8 note","open":true,"overwrite":false} — saves under ~/Documents/Alfred Notes and opens it by default; always requires confirmation; no workspace needed',
+	list_notes: 'list_notes: {"tool":"list_notes"} — lists the user-visible Markdown/text notes in ~/Documents/Alfred Notes',
+	read_note: 'read_note: {"tool":"read_note","filename":"copyable-note.md"} — reads a saved user note by safe leaf filename',
+	open_note: 'open_note: {"tool":"open_note","filename":"optional-note.md"} — opens a saved note, or the Notes folder when filename is omitted',
 	web_search: 'web_search: {"tool":"web_search","query":"search query","numResults":5}',
 	fetch_content: 'fetch_content: {"tool":"fetch_content","url":"https://..."}',
 	remember: 'remember: {"tool":"remember","key":"fact name","value":"fact value","category":"preference|identity|context|note"}',
@@ -129,6 +137,8 @@ export interface ToolResult<TData = unknown> {
 export interface BashToolCall {
 	tool: "bash";
 	command: string;
+	/** Workspace is the default. Host runs machine-wide inspection from a neutral temporary directory. */
+	scope?: "workspace" | "host";
 	cwd?: string;
 	workspaceRef?: string;
 	timeoutMs?: number;
@@ -163,6 +173,40 @@ export interface EditFileToolCall {
 	newText: string;
 	cwd?: string;
 	workspaceRef?: string;
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface SaveNoteToolCall {
+	tool: "save_note";
+	/** Safe leaf filename ending in .md or .txt. Notes are stored under ~/Documents/Alfred Notes. */
+	filename: string;
+	content: string;
+	/** Open with the system default application after saving. Defaults to true. */
+	open?: boolean;
+	/** Existing notes are never replaced unless this exact confirmed flag is true. */
+	overwrite?: boolean;
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface ListNotesToolCall {
+	tool: "list_notes";
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface ReadNoteToolCall {
+	tool: "read_note";
+	filename: string;
+	requestId?: string;
+	toolCallId?: string;
+}
+
+export interface OpenNoteToolCall {
+	tool: "open_note";
+	/** Omit to open the user-visible Notes folder. */
+	filename?: string;
 	requestId?: string;
 	toolCallId?: string;
 }
@@ -426,6 +470,10 @@ export type AlfredToolCall =
 	| ReadFileToolCall
 	| WriteFileToolCall
 	| EditFileToolCall
+	| SaveNoteToolCall
+	| ListNotesToolCall
+	| ReadNoteToolCall
+	| OpenNoteToolCall
 	| WebSearchToolCall
 	| FetchContentToolCall
 	| RememberToolCall
@@ -490,6 +538,23 @@ export interface PendingConfirmation<TPayload = AlfredToolCall> {
 	risk: ToolRiskLevel;
 	payload: TPayload;
 	payloadHash: string;
+	/** Execution context resolved when the action was presented for approval. */
+	executionContext?: { cwd?: string; workspaceRef?: string; notesDirectory?: string };
+	/** Process-only task state used to continue the original request after approval. */
+	continuation?: {
+		originalUserText: string;
+		messages: Array<{ role: "system" | "user" | "assistant" | "tool"; content: string }>;
+		rawAssistantText: string;
+		completedActions: string[];
+		availableCitations: KnowledgeCitation[];
+		workspaceResolution: {
+			workspace?: { ref: string; name: string; cwd?: string; selected: boolean };
+			cwd?: string;
+			ambiguous: boolean;
+			note?: string;
+		};
+		resolvedCwd?: string;
+	};
 	preview: string;
 	createdAt: string;
 	expiresAt: string;

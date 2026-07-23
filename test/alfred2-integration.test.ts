@@ -98,7 +98,7 @@ test("a. web search → final speech", async () => {
 
 // ── b. read file → edit file → run test ──
 
-test("b. read file → edit file → run test", async () => {
+test("b. confirmed edit resumes the original task and runs its remaining check", async () => {
 	const dir = tmpDir("readedit");
 	rmSync(dir, { recursive: true, force: true });
 	mkdirSync(dir, { recursive: true });
@@ -137,13 +137,14 @@ test("b. read file → edit file → run test", async () => {
 	assert.ok(phase1.confirmationId, "should have a confirmationId");
 	const confId = phase1.confirmationId!;
 
-	// Phase 2: confirm edit_file, then bash executes, then final speech
+	// Phase 2: execute the exact edit, then continue from the stored original
+	// request and prior read result—not from the terse approval utterance.
 	const phase2 = await runToolLoop({
 		llmClient: createFakeLlmClient([
 			'{"tool":"bash","command":"echo typecheck ok"}',
 			'{"speech":"File edited and typecheck passes, sir."}',
 		]),
-		userText: "read scratch.ts, change x to 42, then run tsc",
+		userText: "yes",
 		systemContext: ctxWithDir,
 		requestId: "req-readedit-confirm",
 		sessionId: "sess-readedit",
@@ -159,18 +160,14 @@ test("b. read file → edit file → run test", async () => {
 
 	// Final result checks
 	assert.equal(phase2.speech, "File edited and typecheck passes, sir.");
-	// edit_file (confirmed) + bash = 2 more tool results
+	assert.equal(phase2.deterministicCompletion, undefined);
 	assert.equal(phase2.toolResults.length, 2);
 
-	// edit_file check
 	const editResult = phase2.toolResults[0]!;
 	assert.equal(editResult.tool, "edit_file");
 	assert.equal(editResult.success, true);
-
-	// bash (test) check
-	const bashResult = phase2.toolResults[1]!;
-	assert.equal(bashResult.tool, "bash");
-	assert.equal(bashResult.success, true);
+	assert.equal(phase2.toolResults[1]?.tool, "bash");
+	assert.equal(phase2.toolResults[1]?.success, true);
 
 	// Verify the file was actually edited on disk
 	const updatedContent = readFileSync(scratchPath, "utf8");
@@ -178,8 +175,7 @@ test("b. read file → edit file → run test", async () => {
 	assert.doesNotMatch(updatedContent, /\bx = 1\b/);
 	assert.match(updatedContent, /y = 2/);
 
-	// Verify bash was called
-	assert.equal(bashCalls.length, 1);
+	assert.deepEqual(bashCalls, ["echo typecheck ok"]);
 
 	// Confirmation should be consumed
 	assert.equal(store.get(confId), null);
@@ -359,15 +355,11 @@ test("e. dangerous command → confirmation → exact payload execution", async 
 	assert.equal(pending!.tool, "bash");
 	assert.match((pending!.payload as any).command, /rm -rf/);
 
-	// Phase 2: confirm with the same store.
-	// After confirmation executes the stored bash command, the loop continues
-	// and calls the LLM for final speech. The fake LLM should NOT contain a
-	// regenerated bash command — the confirmed payload is used directly.
+	// Phase 2: confirm with the same store. The stored command executes, then
+	// the original task context is restored for final reporting.
 	const phase2 = await runToolLoop({
-		llmClient: createFakeLlmClient([
-			'{"speech":"Build cache cleaned, sir."}',
-		]),
-		userText: "clean the build cache",
+		llmClient: createFakeLlmClient(['{"speech":"Build cache cleaned, sir."}']),
+		userText: "yes",
 		systemContext: ctxWithDir,
 		requestId: "req-danger-confirm",
 		sessionId: "sess-danger",
@@ -385,6 +377,7 @@ test("e. dangerous command → confirmation → exact payload execution", async 
 	// not a regenerated or different command
 	assert.equal(phase2.executed, true);
 	assert.equal(phase2.speech, "Build cache cleaned, sir.");
+	assert.equal(phase2.deterministicCompletion, undefined);
 	assert.match(actualCommand, /rm -rf.*build-cache/);
 	assert.doesNotMatch(actualCommand, /evil-hacked/);
 

@@ -19,6 +19,14 @@ test("parses strict valid tool JSON", () => {
 	assert.equal(result.value.cwd, "/tmp/project");
 });
 
+test("parses host-scoped bash and rejects workspace targeting in host scope", () => {
+	const parsed = assertKind(parseAlfredModelResponse('{"tool":"bash","command":"ps -Ao pid,comm","scope":"host"}'), "tool");
+	assert.equal(parsed.value.tool === "bash" ? parsed.value.scope : undefined, "host");
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"bash","command":"pwd","scope":"machine"}'), "retryable_error").error, /scope must be workspace or host/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"bash","command":"pwd","scope":"host","cwd":"/tmp/project"}'), "retryable_error").error, /cannot set cwd or workspaceRef/);
+	assert.match(assertKind(parseAlfredModelResponse('{"tool":"bash","command":"pwd","scope":"host","workspaceRef":"workspace:1"}'), "retryable_error").error, /cannot set cwd or workspaceRef/);
+});
+
 test("parses inspect_session tool JSON", () => {
 	const result = assertKind(parseAlfredModelResponse('{"tool":"inspect_session","workspaceName":"Collectors Survey","tabHint":"local CI runs","lines":160}'), "tool");
 	assert.equal(result.value.tool, "inspect_session");

@@ -13,7 +13,8 @@ import { clearSessionTurns, createSessionMemory, getSessionMemoryRecords } from 
 import { createProfileStore, getDefaultProfileStore, ProfileMemoryConflictError } from "./profile.ts";
 import { createKnowledgeStore, getDefaultKnowledgeDirectory } from "./knowledge.ts";
 import { MAX_MEMORY_RECALL_LIMIT, MAX_MEMORY_RECALL_QUERY_LENGTH, recallMemory } from "./memory/recall.ts";
-import type { MemoryDashboardState, MemoryKind, ProfileMemoryCategory, ProfileMemoryRecord } from "./memory-types.ts";
+import { MemoryCandidateError, ReviewedMemoryCandidateStore, validateReviewedMemoryWrite } from "./memory/extraction.ts";
+import type { MemoryDashboardState, MemoryKind, ProfileMemoryCategory, ProfileMemoryRecord, ReviewedMemoryCategory } from "./memory-types.ts";
 import { serveDashboardAsset } from "./dashboard-assets.ts";
 import { createAlfredEventBus, type AlfredEventBus } from "./events.ts";
 import { getPersonalityConfig, type AlfredPersonalityConfig } from "./personality.ts";
@@ -37,6 +38,7 @@ import { WorkAdvisor, DEFAULT_WORK_ADVISOR_INTERVAL_MS, shouldConsumeScheduledWo
 import { GoalJobStore, ScheduledJobRunner, parseScheduledTimestamp, validRecurrenceMinutes, validWorkReviewTargetRefs } from "./goals.ts";
 import { createStructuredFailure, createTaskOutcomeFinalizer, type TaskOutcome, type TaskOutcomeFinalizer } from "./capabilities/outcome.ts";
 import { SessionMonitorManager } from "./session-monitor.ts";
+import { listNotes, MAX_NOTE_BYTES, openNote, readNote } from "./tools/note.ts";
 
 export interface Alfred2AgentLike {
 	ask(userText: string, systemContext: string): Promise<AgentResponse>;
@@ -56,6 +58,9 @@ export interface Alfred2Config {
 	historyFile?: string;
 	/** Optional isolated knowledge directory for embedded runtimes and tests. */
 	knowledgeDirectory?: string;
+	/** Optional Alfred-owned Notes directory and opener override for embedded runtimes/tests. */
+	notesDirectory?: string;
+	openNoteFile?: (path: string) => Promise<void>;
 	/** Optional isolated durable goal/job path for embedded runtimes and tests. */
 	goalJobFile?: string;
 	/** Optional isolated work-advisor state path for embedded runtimes and tests. */
@@ -180,6 +185,42 @@ const TOOL_CONTRACTS: DashboardToolContract[] = [
 			'{ "tool": "edit_file", "path": "README.md", "oldText": "Hello", "newText": "Hi" }',
 		],
 		confirm: "confirm",
+	},
+	{
+		name: "save_note",
+		description: "Save a copyable Markdown or text note under ~/Documents/Alfred Notes and open it in the default app.",
+		schema: {
+			tool: "save_note",
+			filename: "safe .md or .txt leaf filename",
+			content: "UTF-8 string",
+			open: "optional boolean, default true",
+			overwrite: "optional boolean, default false",
+		},
+		examples: [
+			'{ "tool": "save_note", "filename": "conference-proposal.md", "content": "# Proposal\\n...", "open": true }',
+		],
+		confirm: "confirm",
+	},
+	{
+		name: "list_notes",
+		description: "List user-visible Markdown and text notes in ~/Documents/Alfred Notes.",
+		schema: { tool: "list_notes" },
+		examples: ['{ "tool": "list_notes" }'],
+		confirm: "none",
+	},
+	{
+		name: "read_note",
+		description: "Read a saved user note so Alfred can reference it later.",
+		schema: { tool: "read_note", filename: "safe .md or .txt leaf filename" },
+		examples: ['{ "tool": "read_note", "filename": "conference-proposal.md" }'],
+		confirm: "none",
+	},
+	{
+		name: "open_note",
+		description: "Open one saved note, or open the user-visible Notes folder.",
+		schema: { tool: "open_note", filename: "optional safe .md or .txt leaf filename" },
+		examples: ['{ "tool": "open_note", "filename": "conference-proposal.md" }', '{ "tool": "open_note" }'],
+		confirm: "none",
 	},
 	{
 		name: "web_search",
@@ -493,6 +534,7 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 	const llmClient = config.llm.llmClient ?? (config.agent ? createAgentBackedLlmClient(config.agent) : createOpenAiCompatibleLlmClient(config.llm));
 	const sessionId = `session-${randomUUID()}`;
 	const sessionMemory = createSessionMemory();
+	const memoryCandidateStore = new ReviewedMemoryCandidateStore();
 	const profileStore = config.profileFile ? createProfileStore(config.profileFile) : getDefaultProfileStore();
 	const knowledgeStore = createKnowledgeStore(config.knowledgeDirectory ?? (config.profileFile ? join(dirname(config.profileFile), "knowledge") : getDefaultKnowledgeDirectory()));
 	const historyStore = config.historyFile ? createHistoryStore(config.historyFile) : getDefaultHistoryStore();
@@ -985,12 +1027,114 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 			}
 		}
 
+		// Reviewed extraction is explicit and proposal-only. The authoritative source
+		// is the retained current-session user text; assistant/tool/history/Knowledge
+		// content is never passed into the deterministic extractor, and returned evidence is bounded.
+		if (req.method === "POST" && url.pathname === "/api/memory/candidates/extract") {
+			const body = await readJsonBody(req, 16 * 1024);
+			if (!body || Object.keys(body).some((key) => !["requestId", "turnIds"].includes(key)) || typeof body.requestId !== "string" || !Array.isArray(body.turnIds) || body.turnIds.some((id) => typeof id !== "string")) {
+				throw new HttpRequestError(400, "requestId and an array of current-session turnIds are required; no other fields are supported.");
+			}
+			try {
+				const profileRecords: ProfileMemoryRecord[] = profileStore.loadProfile().facts.map((fact) => ({
+					id: fact.id,
+					kind: "profile",
+					key: fact.key,
+					value: fact.value,
+					category: fact.category,
+					createdAt: fact.createdAt,
+					updatedAt: fact.updatedAt,
+					provenance: { ...fact.provenance },
+				}));
+				const batch = memoryCandidateStore.create({
+					requestId: body.requestId,
+					sessionId,
+					turnIds: body.turnIds as string[],
+					turns: sessionMemory.turns,
+					profileRecords,
+				});
+				res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+				res.end(JSON.stringify({ ok: true, ...batch }));
+			} catch (cause) {
+				if (cause instanceof MemoryCandidateError) throw new HttpRequestError(cause.code === "source_not_found" ? 409 : 400, cause.message);
+				if (cause instanceof HttpRequestError) throw cause;
+				logPrivateMemoryFailure("candidate-extract", cause);
+				throw new HttpRequestError(503, "Memory candidate extraction is temporarily unavailable.");
+			}
+			return;
+		}
+
+		if (req.method === "POST") {
+			const candidateAction = url.pathname.match(/^\/api\/memory\/candidates\/([^/]+)\/([^/]+)\/(accept|reject)$/);
+			if (candidateAction) {
+				const batchId = decodePathSegment(candidateAction[1] ?? "");
+				const candidateId = decodePathSegment(candidateAction[2] ?? "");
+				const action = candidateAction[3];
+				const body = await readJsonBody(req, 16 * 1024);
+				try {
+					const candidate = memoryCandidateStore.get(batchId, candidateId, sessionId);
+					if (action === "reject") {
+						if (!body || Object.keys(body).length > 0) throw new HttpRequestError(400, "Candidate rejection accepts only an empty JSON object.");
+						memoryCandidateStore.consume(batchId, candidateId, sessionId);
+						res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+						res.end(JSON.stringify({ ok: true, rejected: true, batchId, candidateId }));
+						return;
+					}
+					const sourceRecord = sessionMemory.turns.find((record) => record.id === candidate.source.sessionRecordId);
+					if (!sourceRecord || sourceRecord.createdAt !== candidate.source.timestamp || !sourceRecord.userText.includes(candidate.source.userText)) {
+						throw new HttpRequestError(409, "The selected source request is no longer available unchanged. Extract a fresh candidate.");
+					}
+					if (!body || Object.keys(body).some((key) => !["key", "value", "category"].includes(key)) || typeof body.key !== "string" || typeof body.value !== "string") {
+						throw new HttpRequestError(400, "Candidate acceptance requires only key, value, and category.");
+					}
+					const write = validateReviewedMemoryWrite({ key: body.key, value: body.value, category: body.category as ReviewedMemoryCategory });
+					const now = new Date();
+					const fact = profileStore.createProfileMemoryIfAbsent(
+						write,
+						{
+							source: "conversation",
+							sourceId: candidate.source.sessionRecordId,
+							requestId: candidate.source.requestId,
+							turnId: candidate.source.turnId,
+							timestamp: now.toISOString(),
+							review: {
+								batchId: candidate.batchId,
+								candidateId: candidate.id,
+								requestId: candidate.reviewRequestId,
+								sessionId: candidate.source.sessionId,
+								sessionRecordId: candidate.source.sessionRecordId,
+							},
+						},
+					);
+					memoryCandidateStore.consume(batchId, candidateId, sessionId, now);
+					res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+					res.end(JSON.stringify({ ok: true, fact, batchId, candidateId }));
+				} catch (cause) {
+					if (cause instanceof ProfileMemoryConflictError) {
+						res.writeHead(409, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+						res.end(JSON.stringify({ ok: false, code: cause.code, error: cause.message }));
+						return;
+					}
+					if (cause instanceof MemoryCandidateError) {
+						const status = cause.code === "candidate_expired" ? 410 : cause.code === "candidate_invalid" ? 400 : 404;
+						throw new HttpRequestError(status, cause.message);
+					}
+					if (cause instanceof HttpRequestError) throw cause;
+					logPrivateMemoryFailure("candidate-action", cause);
+					throw new HttpRequestError(503, "Memory candidate action is temporarily unavailable.");
+				}
+				return;
+			}
+		}
+
 		if (req.method === "DELETE" && url.pathname === "/api/memory/session") {
 			const removed = clearSessionTurns(sessionMemory);
+			const removedCandidates = memoryCandidateStore.clear();
 			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 			res.end(JSON.stringify({
 				ok: true,
 				removed,
+				removedCandidates,
 				session: {
 					count: sessionMemory.turns.length,
 					currentContextTokens: sessionMemory.currentContextTokens,
@@ -1097,6 +1241,40 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
 			res.end(JSON.stringify({ ok: true, query, matches }));
 			return;
+		}
+
+		// User-visible Notes are ordinary files in ~/Documents/Alfred Notes. These
+		// APIs let the dashboard list, read/copy, and open them without cmux.
+		if (req.method === "GET" && url.pathname === "/api/notes") {
+			const result = listNotes({ requestId: `api-notes-${randomUUID()}`, toolCallId: `tool-${randomUUID()}`, risk: "read" }, { notesDirectory: config.notesDirectory });
+			res.writeHead(result.success ? 200 : 500, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+			res.end(JSON.stringify(result.success ? { ok: true, ...result.data } : { ok: false, error: result.text }));
+			return;
+		}
+
+		if (req.method === "POST" && url.pathname === "/api/notes/open") {
+			const body = await readJsonBody(req);
+			const keys = body ? Object.keys(body) : [];
+			if (!body || keys.some((key) => key !== "filename") || (body.filename !== undefined && (typeof body.filename !== "string" || !body.filename.trim()))) {
+				res.writeHead(400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+				res.end(JSON.stringify({ ok: false, error: "Body must be {} or { filename: a non-empty .md/.txt leaf filename }." }));
+				return;
+			}
+			const result = await openNote({ tool: "open_note", filename: typeof body.filename === "string" ? body.filename : undefined }, { requestId: `api-note-open-${randomUUID()}`, toolCallId: `tool-${randomUUID()}`, risk: "read" }, { notesDirectory: config.notesDirectory, openFile: config.openNoteFile });
+			res.writeHead(result.success ? 200 : 400, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+			res.end(JSON.stringify(result.success ? { ok: true, ...result.data } : { ok: false, error: result.text }));
+			return;
+		}
+
+		if (req.method === "GET") {
+			const noteMatch = url.pathname.match(/^\/api\/notes\/([^/]+)$/);
+			if (noteMatch) {
+				const filename = decodePathSegment(noteMatch[1] ?? "");
+				const result = readNote({ tool: "read_note", filename }, { requestId: `api-note-read-${randomUUID()}`, toolCallId: `tool-${randomUUID()}`, risk: "read" }, { notesDirectory: config.notesDirectory, maxReadBytes: MAX_NOTE_BYTES });
+				res.writeHead(result.success ? 200 : 404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+				res.end(JSON.stringify(result.success ? { ok: true, ...result.data } : { ok: false, error: result.text }));
+				return;
+			}
 		}
 
 		// Durable goals and bounded scheduled jobs. Jobs can remind or request a
@@ -1527,6 +1705,8 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 				turnId,
 				profileStore,
 				knowledgeStore,
+				notesDirectory: config.notesDirectory,
+				openNoteFile: config.openNoteFile,
 				confirm: body?.confirm === true,
 				confirmationId: typeof body?.confirmationId === "string" ? body.confirmationId : undefined,
 				autoConfirm,
@@ -1551,12 +1731,14 @@ export async function startAlfred2(config: Alfred2Config): Promise<Alfred2Server
 			const agentMs = Date.now() - agentStart;
 
 			const speechFormatterStart = Date.now();
-			const speechFormatter = await formatSpeechForTts({
-				llmClient,
-				userText,
-				speech: loopResult.speech,
-				displayText: loopResult.displayText,
-			});
+			const speechFormatter = loopResult.deterministicCompletion
+				? { speech: loopResult.speech, used: false, model: null, maxTokens: 0, inputTokensEstimate: 0 }
+				: await formatSpeechForTts({
+					llmClient,
+					userText,
+					speech: loopResult.speech,
+					displayText: loopResult.displayText,
+				});
 			const speechFormatterMs = Date.now() - speechFormatterStart;
 			const presentedSpeech = speechFormatter.speech;
 
@@ -1863,7 +2045,7 @@ function isLoopbackHost(host: string): boolean {
 }
 
 function isPrivateApiPath(pathname: string): boolean {
-	return pathname === "/api/memory" || pathname.startsWith("/api/memory/") || pathname.startsWith("/dashboard/knowledge/");
+	return pathname === "/api/memory" || pathname.startsWith("/api/memory/") || pathname.startsWith("/dashboard/knowledge/") || pathname === "/api/notes" || pathname.startsWith("/api/notes/");
 }
 
 function isPrivateMemoryRequest(req: IncomingMessage): boolean {

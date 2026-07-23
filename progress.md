@@ -1,18 +1,23 @@
 # Alfred Progress
 
-## Latest Update: 2026-07-20 — Standalone Phase 6A Memory Lifecycle and Recall Complete
+## Latest Update: 2026-07-20 — Standalone Phase 6B Reviewed Memory Extraction Complete
 
 ### Status
-Alfred now provides stable-ID, optimistic-concurrency profile editing; canonical profile deletion; turn-only working-memory clearing that retains token accounting, activity history, and handoffs; and grouped unified recall across Profile, Session, and Knowledge. Knowledge evidence returned through unified recall keeps exact request-scoped citation validation. The Memory page exposes full provenance identifiers and timestamps plus explicit retention/deletion boundaries for all three memory classes.
+Alfred now offers explicitly invoked, deterministic Profile-memory suggestions from user-selected current-session requests. Only full retained user text is inspected; assistant/tool output, Knowledge, history, handoffs, files, secrets, sensitive facts, and temporary task preferences are excluded. Candidates are bounded, server-session-scoped, process-only, and individually accepted, edited-and-accepted, or rejected. Auto-confirm and natural-language confirmation cannot accept them.
 
-Automatic conversation extraction, conflict arbitration, outdated-fact/supersession handling, and silent durable memory writes remain deferred pending an explicit reviewed-candidate contract.
+Accepted candidates use an atomic, case-insensitive create-if-absent profile write. Existing facts—including manual facts—are never replaced; conflicts route to the separate revision-checked Profile editor. Durable provenance retains original session/request/turn identity plus typed review batch/candidate metadata. Rejections, expired candidates, and superseded-value history are not persisted.
 
 ### Validation
-- `pnpm run check` passes: 478 backend tests and 19 web tests, plus root and web typechecks.
-- Profile store coverage verifies stable identity/creation metadata/extension preservation and stale/collision/empty/missing behavior.
-- Session tests verify turn-only clearing leaves accounting intact.
-- Unified recall/API/tool-loop tests cover all three kinds, filters/bounds, detached records, origin guards, and request-scoped citations.
-- Memory UI tests cover edit/cancel/failure behavior, session clear copy, visible provenance/timestamps, grouped recall, and stale-response protection.
+- `pnpm run check` passes: 512 backend tests and 26 web tests, plus root and web typechecks.
+- Extraction tests cover selected-source isolation, full-turn scanning beyond dashboard truncation, exact bounded evidence, eligibility bounds, secret/sensitive gates, TTL/session isolation, and atomic conflict behavior.
+- API tests cover origin/media/body guards, no-store responses, auto-confirm/natural-language bypass resistance, replay, rejection, provenance, conflict preservation, and session-clear invalidation.
+- Memory UI tests cover explicit selection, independent accept/edit/reject controls, conflict blocking, auto-confirm invariance, focus/status behavior, and stale extraction responses after clearing.
+- Two adversarial review rounds found no remaining blocker or high-severity Phase 6B issue.
+
+## Previous Update: 2026-07-20 — Standalone Phase 6A Memory Lifecycle and Recall Complete
+
+### Status
+Alfred provides stable-ID, optimistic-concurrency profile editing; canonical profile deletion; turn-only working-memory clearing that retains token accounting, activity history, and handoffs; and grouped unified recall across Profile, Session, and Knowledge. Knowledge evidence returned through unified recall keeps exact request-scoped citation validation. The Memory page exposes full provenance identifiers and timestamps plus explicit retention/deletion boundaries for all three memory classes.
 
 ## Previous Update: 2026-07-14 — Standalone Phase 5 Knowledge/RAG MVP Complete
 

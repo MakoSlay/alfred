@@ -3,11 +3,12 @@ import type { DashboardState } from "../api/types";
 import { AlfredWaveform } from "./AlfredWaveform";
 import { StatusPill } from "./StatusPill";
 
-export type PageId = "radar" | "voice" | "memory" | "safety" | "tools" | "settings";
+export type PageId = "radar" | "voice" | "notes" | "memory" | "safety" | "tools" | "settings";
 
 const NAV_ITEMS: Array<{ id: PageId; label: string; glyph: string }> = [
   { id: "radar", label: "Radar", glyph: "R" },
   { id: "voice", label: "Voice", glyph: "V" },
+  { id: "notes", label: "Notes", glyph: "N" },
   { id: "memory", label: "Memory", glyph: "M" },
   { id: "safety", label: "Safety", glyph: "S" },
   { id: "tools", label: "Tools", glyph: "T" },

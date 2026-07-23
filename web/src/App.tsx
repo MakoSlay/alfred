@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { alfredApi } from "./api/client";
-import type { DashboardState, KnowledgeImportRequest, KnowledgeSearchMatch, MemoryKind, MemoryRecallResponse, ProfileFact, ToolContract, TtsSettingsPatch } from "./api/types";
+import type { DashboardState, KnowledgeImportRequest, KnowledgeSearchMatch, MemoryCandidateBatch, MemoryKind, MemoryRecallResponse, ProfileFact, ReviewedMemoryCandidate, ToolContract, TtsSettingsPatch } from "./api/types";
 import { AppShell, type PageId } from "./components/AppShell";
 import { MemoryPage } from "./pages/MemoryPage";
+import { NotesPage } from "./pages/NotesPage";
 import { RadarPage } from "./pages/RadarPage";
 import { SafetyPage } from "./pages/SafetyPage";
 import { SettingsPage, type ThemeId } from "./pages/SettingsPage";
@@ -12,7 +13,7 @@ import { useAlfredEvents } from "./hooks/useAlfredEvents";
 
 const PAGE_KEY = "alfred2-page";
 const THEME_KEY = "alfred2-vibe";
-const PAGE_IDS: PageId[] = ["radar", "voice", "memory", "safety", "tools", "settings"];
+const PAGE_IDS: PageId[] = ["radar", "voice", "notes", "memory", "safety", "tools", "settings"];
 const THEME_IDS: ThemeId[] = ["estate", "cave", "concierge"];
 
 function savedPage(): PageId {
@@ -165,6 +166,25 @@ export default function App() {
     return result;
   }
 
+  async function extractMemoryCandidates(turnIds: string[]): Promise<MemoryCandidateBatch> {
+    const result = await alfredApi.extractMemoryCandidates(turnIds);
+    setNotice(result.candidates.length ? `Review ${result.candidates.length} temporary memory candidate${result.candidates.length === 1 ? "" : "s"}.` : "No eligible memory candidates found.");
+    return result;
+  }
+
+  async function acceptMemoryCandidate(batchId: string, candidateId: string, write: Pick<ReviewedMemoryCandidate, "key" | "value" | "category">): Promise<boolean> {
+    return runAction(async () => {
+      const result = await alfredApi.acceptMemoryCandidate(batchId, candidateId, write);
+      ++refreshSequence.current;
+      setState((current) => current ? upsertProfileFact(current, result.fact) : current);
+      return "Reviewed candidate saved to Profile memory.";
+    });
+  }
+
+  async function rejectMemoryCandidate(batchId: string, candidateId: string): Promise<boolean> {
+    return runAction(async () => { await alfredApi.rejectMemoryCandidate(batchId, candidateId); return "Memory candidate rejected without saving."; });
+  }
+
   async function importKnowledge(input: KnowledgeImportRequest): Promise<boolean> {
     return runAction(async () => {
       const result = await alfredApi.importKnowledge(input);
@@ -242,7 +262,8 @@ export default function App() {
   switch (page) {
     case "radar": content = <RadarPage busy={busy} events={events} onAsk={ask} state={state} />; break;
     case "voice": content = <VoicePage connection={connection} latestEvent={latestEvent} onSave={saveTts} onTest={testTts} settings={state.tts} />; break;
-    case "memory": content = <MemoryPage onAdd={addFact} onClearSession={clearSessionMemory} onDelete={deleteFact} onDeleteKnowledge={deleteKnowledge} onImportKnowledge={importKnowledge} onRecall={recallMemory} onReindexKnowledge={reindexKnowledge} onSearchKnowledge={searchKnowledge} onUpdate={updateFact} state={state} />; break;
+    case "notes": content = <NotesPage />; break;
+    case "memory": content = <MemoryPage onAcceptCandidate={acceptMemoryCandidate} onAdd={addFact} onClearSession={clearSessionMemory} onDelete={deleteFact} onDeleteKnowledge={deleteKnowledge} onExtractCandidates={extractMemoryCandidates} onImportKnowledge={importKnowledge} onRecall={recallMemory} onRejectCandidate={rejectMemoryCandidate} onReindexKnowledge={reindexKnowledge} onSearchKnowledge={searchKnowledge} onUpdate={updateFact} state={state} />; break;
     case "safety": content = <SafetyPage onClear={clearUndo} onRestore={restoreUndo} onToggleAutoConfirm={toggleAutoConfirm} onToggleMute={toggleMute} state={state} />; break;
     case "tools": content = <ToolsPage events={events} onAskCapabilities={() => ask("what can you do?")} tools={tools} />; break;
     case "settings": content = <SettingsPage connection={connection} onThemeChange={setTheme} state={state} theme={theme} />; break;

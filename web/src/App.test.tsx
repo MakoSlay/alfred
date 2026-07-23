@@ -11,6 +11,9 @@ const api = vi.hoisted(() => ({
   deleteFact: vi.fn(),
   clearSessionMemory: vi.fn(),
   recallMemory: vi.fn(),
+  extractMemoryCandidates: vi.fn(),
+  acceptMemoryCandidate: vi.fn(),
+  rejectMemoryCandidate: vi.fn(),
   importKnowledge: vi.fn(),
   deleteKnowledge: vi.fn(),
   reindexKnowledge: vi.fn(),
@@ -184,6 +187,26 @@ describe("Memory lifecycle actions", () => {
     expect(api.deleteFact).toHaveBeenCalledWith("profile-theme");
     expect(await screen.findByText(/Profile memory deleted/)).toBeVisible();
     expect(screen.getByLabelText("Filter profile facts")).toHaveFocus();
+  });
+
+  it("persists only an individually accepted reviewed candidate", async () => {
+    const user = userEvent.setup();
+    const initial = state([]);
+    initial.autoConfirm = true;
+    initial.memoryTurns = 1;
+    initial.memory.session = { ephemeral: true, count: 1, currentContextTokens: 0, cumulativeTotalTokens: 0, records: [{ id: "session-1", kind: "session", ephemeral: true, userText: "I prefer concise updates.", finalSpeech: "Not a source.", toolsUsed: [], workspaceHint: "", shortOutcome: "", createdAt: timestamp, updatedAt: timestamp, provenance: { source: "conversation", requestId: "source-request", turnId: "source-turn", timestamp } }] };
+    const accepted = { ...fact("profile-updates", "preferred_updates", "concise"), provenance: { source: "conversation" as const, sourceId: "session-1", requestId: "source-request", turnId: "source-turn", timestamp } };
+    api.state.mockResolvedValue(initial);
+    api.extractMemoryCandidates.mockResolvedValue({ ok: true, batchId: "batch-1", requestId: "review-1", sessionId: initial.sessionId, ephemeral: true, createdAt: timestamp, expiresAt: "2026-07-14T10:15:00.000Z", excluded: [], candidates: [{ id: "candidate-1", batchId: "batch-1", reviewRequestId: "review-1", ephemeral: true, key: "preferred_updates", value: "concise", category: "preference", source: { sessionId: initial.sessionId, sessionRecordId: "session-1", requestId: "source-request", turnId: "source-turn", timestamp, userText: "I prefer concise updates." } }] });
+    api.acceptMemoryCandidate.mockResolvedValue({ ok: true, fact: accepted, batchId: "batch-1", candidateId: "candidate-1" });
+    render(<App />);
+    await user.click(await screen.findByRole("tab", { name: /Session/ }));
+    await user.click(screen.getByLabelText("Select request: I prefer concise updates."));
+    await user.click(screen.getByRole("button", { name: "Extract candidates" }));
+    expect(api.acceptMemoryCandidate).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole("button", { name: "Accept and save" }));
+    expect(api.acceptMemoryCandidate).toHaveBeenCalledWith("batch-1", "candidate-1", { key: "preferred_updates", value: "concise", category: "preference" });
+    expect((await screen.findAllByText(/Reviewed candidate saved/)).length).toBeGreaterThanOrEqual(1);
   });
 
   it("clears working-memory summaries while reporting retained history", async () => {

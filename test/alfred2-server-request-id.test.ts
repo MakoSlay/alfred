@@ -254,13 +254,66 @@ test("state-changing APIs reject external origins, wrong media types, and malfor
 	});
 });
 
+test("confirmed note completion skips all post-action model formatting", async () => {
+	const profile = temporaryProfile();
+	const notesDirectory = join(profile.directory, "notes");
+	const previousFormatterMode = process.env.ALFRED_SPEECH_FORMATTER_ENABLED;
+	process.env.ALFRED_SPEECH_FORMATTER_ENABLED = "true";
+	let modelCalls = 0;
+	const llmClient = { complete: async (request: { messages: Array<{ role: string; content: string }> }) => {
+		modelCalls++;
+		const system = request.messages[0]?.content ?? "";
+		if (/spoken-voice presenter/.test(system)) return { text: '{"speech":"Formatted confirmation, sir."}' };
+		return { text: '{"tool":"save_note","filename":"server-note.md","content":"copyable content"}' };
+	} };
+	const server = await startAlfred2({
+		host: "127.0.0.1",
+		port: 0,
+		llm: { endpoint: "https://example.invalid/v1", model: "fake", apiKey: "fake", llmClient },
+		profileFile: profile.file,
+		historyFile: profile.historyFile,
+		notesDirectory,
+		openNoteFile: async () => {},
+	});
+	try {
+		const baseUrl = `http://${server.host}:${server.port}`;
+		const pendingResponse = await fetch(`${baseUrl}/ask`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "save this as a note and open it" }) });
+		const pending = await pendingResponse.json() as { confirmationId?: string; requiresConfirmation?: boolean };
+		assert.equal(pending.requiresConfirmation, true);
+		assert.ok(pending.confirmationId);
+		const callsBeforeConfirmation = modelCalls;
+		const completedResponse = await fetch(`${baseUrl}/ask`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "yes", confirm: true, confirmationId: pending.confirmationId }) });
+		const completed = await completedResponse.json() as { speech: string; displayText: string; trace?: { speechFormatter?: { used?: boolean } } };
+		assert.equal(modelCalls, callsBeforeConfirmation);
+		assert.equal(completed.speech, "Saved and opened that note, sir.");
+		assert.match(completed.displayText, /server-note\.md/);
+		assert.equal(completed.trace?.speechFormatter?.used, false);
+		assert.equal(readFileSync(join(notesDirectory, "server-note.md"), "utf8"), "copyable content");
+
+		const notes = await (await fetch(`${baseUrl}/api/notes`)).json() as { notes: Array<{ filename: string }> };
+		assert.deepEqual(notes.notes.map((note) => note.filename), ["server-note.md"]);
+		const read = await (await fetch(`${baseUrl}/api/notes/server-note.md`)).json() as { content: string };
+		assert.equal(read.content, "copyable content");
+		const opened = await (await fetch(`${baseUrl}/api/notes/open`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filename: "server-note.md" }) })).json() as { ok: boolean; kind: string };
+		assert.equal(opened.ok, true);
+		assert.equal(opened.kind, "note");
+		const malformedOpen = await fetch(`${baseUrl}/api/notes/open`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filename: 42 }) });
+		assert.equal(malformedOpen.status, 400);
+	} finally {
+		await server.close();
+		if (previousFormatterMode === undefined) delete process.env.ALFRED_SPEECH_FORMATTER_ENABLED;
+		else process.env.ALFRED_SPEECH_FORMATTER_ENABLED = previousFormatterMode;
+		rmSync(profile.directory, { recursive: true, force: true });
+	}
+});
+
 test("dashboard state and tools endpoints expose live controls", async () => {
 	await withServer(async (baseUrl) => {
 		const toolsResponse = await fetch(`${baseUrl}/tools`);
 		const tools = await toolsResponse.json() as { ok: boolean; count: number; names: string[]; contracts: Array<{ name: string }> };
 		assert.equal(toolsResponse.status, 200);
 		assert.equal(tools.ok, true);
-		assert.equal(tools.count, 33);
+		assert.equal(tools.count, 37);
 		assert.equal(tools.names.includes("bash"), true);
 		assert.equal(tools.contracts.some((contract) => contract.name === "remember"), true);
 		assert.equal(tools.contracts.some((contract) => contract.name === "search_knowledge"), true);
@@ -298,7 +351,7 @@ test("dashboard state and tools endpoints expose live controls", async () => {
 		assert.equal(state.ok, true);
 		assert.equal(state.autoConfirm, true);
 		assert.equal(state.toolRounds, 0);
-		assert.equal(state.tools.count, 33);
+		assert.equal(state.tools.count, 37);
 		assert.equal(state.listener.provider, "off");
 		assert.equal(state.listener.running, false);
 		assert.equal(state.recentResponses.some((entry) => entry.requestId === "req-dashboard-recall" && entry.userText === "please leave a previous response marker" && entry.responseText === "Done, sir."), true);

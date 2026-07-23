@@ -223,7 +223,7 @@ test("isPackageMutation matches package mutations", () => {
 
 function makeConfirmation(overrides: Partial<PendingConfirmation<BashToolCall>> & { payload?: BashToolCall } = {}): PendingConfirmation<BashToolCall> {
 	const payload: BashToolCall = overrides.payload ?? { tool: "bash", command: "echo hello", cwd: "/tmp/test" };
-	const hash = hashPayload(payload);
+	const hash = hashPayload(payload, overrides.executionContext);
 	return {
 		confirmationId: overrides.confirmationId ?? `confirm-${Math.random().toString(36).slice(2)}`,
 		requestId: overrides.requestId ?? "req-1",
@@ -232,6 +232,7 @@ function makeConfirmation(overrides: Partial<PendingConfirmation<BashToolCall>> 
 		risk: overrides.risk ?? "mutation",
 		payload,
 		payloadHash: overrides.payloadHash ?? hash,
+		executionContext: overrides.executionContext,
 		preview: overrides.preview ?? createConfirmationPreview(payload, "/tmp/test"),
 		createdAt: overrides.createdAt ?? new Date().toISOString(),
 		expiresAt: overrides.expiresAt ?? new Date(Date.now() + 300_000).toISOString(),
@@ -306,6 +307,16 @@ test("confirmation hash matches payload, rejects tampered payload", () => {
 	assert.equal(store.verifyIntegrity(conf.confirmationId), false);
 	// Item should be removed after integrity failure
 	assert.equal(store.get(conf.confirmationId), null);
+});
+
+test("confirmation integrity also binds the resolved execution context", () => {
+	const store = new PendingConfirmationStore<BashToolCall>();
+	const payload: BashToolCall = { tool: "bash", command: "echo safe" };
+	const executionContext = { cwd: "/tmp/original", workspaceRef: "workspace:1" };
+	const conf = store.add(makeConfirmation({ payload, executionContext, payloadHash: hashPayload(payload, executionContext) }));
+	assert.equal(store.verifyIntegrity(conf.confirmationId), true);
+	conf.executionContext = { cwd: "/tmp/drifted", workspaceRef: "workspace:2" };
+	assert.equal(store.verifyIntegrity(conf.confirmationId), false);
 });
 
 test("remove deletes confirmation by id", () => {
@@ -413,6 +424,12 @@ test("createConfirmationPreview handles missing cwd", () => {
 	const preview = createConfirmationPreview(tc);
 	assert.match(preview, /echo hello/);
 	assert.equal(preview.includes("Cwd:"), false);
+});
+
+test("createConfirmationPreview identifies host-scoped bash", () => {
+	const tc: BashToolCall = { tool: "bash", command: "ps -Ao pid,comm", scope: "host" };
+	const preview = createConfirmationPreview(tc, "/tmp");
+	assert.match(preview, /Scope: host/);
 });
 
 test("hashPayload is deterministic", () => {
