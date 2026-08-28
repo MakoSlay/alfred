@@ -89,6 +89,8 @@ function isNewerTimestamp(timestamp: string, previous: string | null): boolean {
 
 async function readLatestTranscript(dbPath: string): Promise<WisprTranscript | null> {
 	const query = `
+		PRAGMA query_only = ON;
+
 		SELECT
 			transcriptEntityId AS id,
 			timestamp,
@@ -106,7 +108,7 @@ async function readLatestTranscript(dbPath: string): Promise<WisprTranscript | n
 	`;
 
 	try {
-		const { stdout } = await execFileAsync("sqlite3", ["-json", dbPath, query], {
+		const { stdout } = await execFileAsync("sqlite3", ["-readonly", "-json", dbPath, query], {
 			encoding: "utf8",
 			maxBuffer: 512 * 1024,
 		});
